@@ -1,11 +1,12 @@
 mod mock_db;
 mod network;
 mod storage;
-mod consensus_execution_adapter;
+pub mod consensus_engine;
+pub mod simple_consensus_engine;
 
-use std::{collections::{HashMap, HashSet}, fs, path::PathBuf, sync::Arc, thread};
+use std::{collections::{HashMap, HashSet}, fmt::Display, fs, path::PathBuf, sync::Arc, thread};
 use aptos_config::{config::{NodeConfig, Peer, PeerRole, RocksdbConfigs, StorageDirPaths}, network_id::NetworkId};
-use aptos_crypto::{x25519, HashValue};
+use aptos_crypto::{x25519};
 use aptos_event_notifications::EventNotificationSender;
 use aptos_infallible::RwLock;
 use aptos_network::application::{interface::{NetworkClient, NetworkServiceEvents}, storage::PeersAndMetadata};
@@ -17,7 +18,7 @@ use clap::Parser;
 use futures::channel::mpsc;
 use aptos_consensus::gravity_state_computer::ConsensusAdapterArgs;
 use network::{build_network_interfaces, consensus_network_configuration, create_network_runtime, extract_network_configs, extract_network_ids, mempool_network_configuration};
-use crate::consensus_execution_adapter::ConsensusExecutionAdapter;
+use crate::consensus_engine::GravityConsensusEngine;
 
 pub struct ApplicationNetworkInterfaces<T> {
     pub network_client: NetworkClient<T>,
@@ -47,6 +48,36 @@ pub enum GCEIError {
     ConsensusError,
 }
 
+impl Display for GCEIError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Consensus Error")
+    }
+}
+
+impl GTxn {
+    pub fn new(
+        sequence_number: u64,
+        max_gas_amount: u64,
+        gas_unit_price: u64,
+        expiration_timestamp_secs: u64,
+        chain_id: u8,
+        txn_bytes: Vec<u8>,
+    ) -> Self {
+        Self {
+            sequence_number,
+            max_gas_amount,
+            gas_unit_price,
+            expiration_timestamp_secs,
+            chain_id,
+            txn_bytes,
+        }
+    }
+
+    pub fn get_bytes(&self) -> &Vec<u8> {
+        &self.txn_bytes
+    }
+}
+
 /// GCEI: Gravity Consensus Engine Interface
 ///
 /// This trait defines the interface for a consensus process engine.
@@ -61,7 +92,7 @@ pub trait GravityConsensusEngineInterface: Send + Sync {
     /// - Setting up initial state
     /// - Connecting to the network
     /// - Loading configuration
-    fn init(&mut self);
+    fn init() -> Self;
 
     /// Receive and process valid transactions.
     ///
@@ -128,7 +159,7 @@ pub struct GravityNodeArgs {
 }
 
 impl GravityNodeArgs {
-    pub fn run(mut self) {
+    pub fn run(self) {
         // Get the config file path
         let config_path = self.node_config_path.expect("Config is required to launch node");
         if !config_path.exists() {
@@ -295,7 +326,7 @@ pub fn start(node_config: NodeConfig, mockdb_config_path: Option<PathBuf>) -> an
         .expect("Consensus must subscribe to reconfigurations");
     let vtxn_pool = VTxnPoolState::default();
     let mut arg = ConsensusAdapterArgs::new(mempool_client_sender);
-    let adapter = ConsensusExecutionAdapter::new(&mut arg);
+    let adapter = GravityConsensusEngine::new(&mut arg);
     let _consensus = aptos_consensus::consensus_provider::start_consensus(
         &node_config,
         consensus_network_interfaces.network_client,

@@ -1,4 +1,5 @@
 use alloy::consensus::TxEnvelope;
+use gravity_sdk::simple_consensus_engine::SimpleConsensusEngine;
 use reth_ethereum_engine_primitives::{EthEngineTypes, EthPayloadAttributes};
 use reth_node_core::rpc::types::engine::{ForkchoiceState, PayloadId, PayloadStatus, PayloadStatusEnum};
 use reth_rpc_api::{EngineApiClient, EngineEthApiClient};
@@ -9,24 +10,27 @@ use reth_node_core::primitives::{Address, B256};
 use reth_node_core::rpc::types::ExecutionPayloadV3;
 use reth_primitives::hex::FromHex;
 use reth_rpc_types::engine::{payload, ForkchoiceUpdated, PayloadAttributes};
-use reth_rpc_types::{ExecutionPayloadV2, Transaction};
-use crate::mock_gpei::MockGPEI;
+use reth_rpc_types::{ExecutionPayloadV2};
+use crate::gcei_sender::GCEISender;
+
 
 pub struct MockEthConsensusLayer<T: EngineEthApiClient<EthEngineTypes> + Send + Sync> {
     engine_api_client: T,
-    gpei: MockGPEI,
+    gcei: GCEISender<SimpleConsensusEngine>,
+    chain_id: u64,
 }
 
 impl<T: EngineEthApiClient<EthEngineTypes> + Send + Sync> MockEthConsensusLayer<T> {
-    pub(crate) fn new(client: T) -> Self {  // <1>
+    pub(crate) fn new(client: T, chain_id: u64) -> Self {  // <1>
         Self {
+            chain_id,
             engine_api_client: client,
-            gpei: MockGPEI::new(),
+            gcei: GCEISender::new(chain_id),
         }
     }
 
-    pub(crate) async fn start_round(&self, genesis_hash: B256) -> Result<()> {
-        let hex_string = "0x5e7d2b733eafebe9f5c3db5fda98eef2157c115e73d7adbe0e6663ae5c602eec";
+    pub(crate) async fn start_round(&mut self, genesis_hash: B256) -> Result<()> {
+        let hex_string = "0x1b7178ddc6982bb501c3785246cad6f5c62ab8db169674f08250d73b8ad2bfde";
         let byte_array: [u8; 32] = <[u8; 32]>::from_hex(hex_string).expect("Invalid hex string");
         let fork_choice_state = ForkchoiceState {
             head_block_hash: B256::new(byte_array),
@@ -62,7 +66,7 @@ impl<T: EngineEthApiClient<EthEngineTypes> + Send + Sync> MockEthConsensusLayer<
         }
     }
 
-    pub(crate) async fn run_round(&self, mut fork_choice_state: ForkchoiceState) -> Result<()> {
+    pub(crate) async fn run_round(&mut self, mut fork_choice_state: ForkchoiceState) -> Result<()> {
         let mut round = 0;
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -81,19 +85,15 @@ impl<T: EngineEthApiClient<EthEngineTypes> + Send + Sync> MockEthConsensusLayer<
             let payload = <T as EngineApiClient<EthEngineTypes>>::get_payload_v3(&self.engine_api_client, payload_id)
                 .await
                 .context("Failed to get payload")?;
-            
-            let txns: Vec<_> = payload.execution_payload.payload_inner.payload_inner.transactions.iter().map(|txn_bytes| {
-                self.deserialization_txn(txn_bytes)
-            }).collect();
 
             // 1. submit valid transactions
-            self.gpei.submit_valid_transactions(txns);
+            self.gcei.submit_valid_transactions_v3(&payload_id, &payload).await;
             println!("Got payload: {:?}", payload);
             // submit payload
 
 
             // 2. polling order blocks
-            if self.gpei.polling_order_blocks().is_ok() {
+            if self.gcei.polling_order_blocks_v3().await.is_ok() {
                 let payload_status = <T as EngineApiClient<EthEngineTypes>>::new_payload_v3(&self.engine_api_client, payload.execution_payload, Vec::new(),
                                                                                             parent_beacon_block_root)
                     .await
@@ -102,25 +102,18 @@ impl<T: EngineEthApiClient<EthEngineTypes> + Send + Sync> MockEthConsensusLayer<
                 if payload_status.latest_valid_hash.is_none() {
                     continue;
                 }
-                self.gpei.submit_compute_res(payload_status.latest_valid_hash.unwrap());
+                self.gcei.submit_compute_res(payload_status.latest_valid_hash.unwrap()).await.expect("TODO: panic message");
                 // 4. polling submit blocks
-                if self.gpei.polling_submit_blocks().is_ok() {
-                    // 根据 payload 的状态更新 ForkchoiceState
+                if self.gcei.polling_submit_blocks().await.is_ok() {
                     fork_choice_state = self.handle_payload_status(fork_choice_state, payload_status)?;
                     // 5. submit max persistence block id
-                    self.gpei.submit_max_persistence_block_id();
+                    self.gcei.submit_max_persistence_block_id();
                 }
             }
 
         }
     }
 
-    fn deserialization_txn(&self, bytes: &Bytes) -> TxEnvelope {
-        let bytes: Vec<u8> = bytes.to_vec();
-        let txn = TxEnvelope::decode_2718(&mut bytes.as_ref()).unwrap();
-        println!("Got tx: {:?}", txn);
-        txn
-    }
 
     /// 创建 PayloadAttributes 的辅助函数
     fn create_payload_attributes(parent_beacon_block_root: B256) -> EthPayloadAttributes {
