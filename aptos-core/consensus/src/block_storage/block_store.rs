@@ -121,6 +121,10 @@ impl BlockStore {
         block_store
     }
 
+    pub fn get_block_tree(&self) -> Arc<RwLock<BlockTree>> {
+        self.inner.clone()
+    }
+
     async fn try_send_for_execution(&self) {
         // reproduce the same batches (important for the commit phase)
         let mut certs = self.inner.read().get_all_quorum_certs_with_commit_info();

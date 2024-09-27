@@ -123,7 +123,6 @@ impl UserPayloadClient for QuorumStoreClient {
         let payload = loop {
             // Make sure we don't wait more than expected, due to thread scheduling delays/processing time consumed
             let done = start_time.elapsed() >= max_poll_time;
-            println!("try to pull user payload client");
             let payload = self
                 .pull_internal(
                     max_items,
@@ -137,7 +136,6 @@ impl UserPayloadClient for QuorumStoreClient {
                     block_timestamp,
                 )
                 .await?;
-            println!("get payload, size {:?}", payload.len());
             if payload.is_empty() && !return_empty && !done {
                 if let Some(callback) = callback_wrapper.take() {
                     callback.await;

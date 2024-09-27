@@ -86,6 +86,10 @@ pub struct NodeConfig {
     pub validator_network: Option<NetworkConfig>,
     #[serde(default)]
     pub indexer_db_config: InternalIndexerDBConfig,
+    #[serde(default)]
+    pub mock_db_path: PathBuf,
+    #[serde(default)]
+    pub test_mode: bool,
 }
 
 impl NodeConfig {
