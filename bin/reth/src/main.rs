@@ -3,7 +3,7 @@
 mod cli;
 mod reth_client;
 
-
+use std::sync::Arc;
 use clap::Args;
 use reth_provider::BlockReaderIdExt;
 use std::thread;
@@ -27,37 +27,42 @@ use reth_node_ethereum::{node::EthereumAddOns, EthereumNode};
 use reth_primitives::B256;
 use reth_provider::providers::BlockchainProvider2;
 use reth_rpc_api::EngineEthApiClient;
-use api::{check_bootstrap_config, ExecutionApi};
+use api::{check_bootstrap_config, ExecutionApi, NodeConfig};
+use api::consensus_api::ConsensusEngine;
+use api_types::ConsensusApi;
 use crate::reth_client::RethCli;
 
 struct TestConsensusLayer<T> {
     safe_hash: [u8; 32],
     head_hash: [u8; 32],
-    reth_cli: RethCli<T>
+    reth_cli: Arc<RethCli<T>>,
+    consensus_engine: Arc<dyn ConsensusApi>,
 }
 
-impl<T: EngineEthApiClient<EthEngineTypes> + Send + Sync> TestConsensusLayer<T> {
-    fn new(reth_cli: RethCli<T>, safe_hash: B256, head_hash: B256) -> Self {
+impl<T: EngineEthApiClient<EthEngineTypes> + Send + Sync + 'static> TestConsensusLayer<T> {
+    fn new(reth_cli: RethCli<T>, node_config: NodeConfig, safe_hash: [u8; 32], head_hash: [u8; 32]) -> Self {
         let mut safe_slice = [0u8; 32];
         safe_slice.copy_from_slice(safe_hash.as_slice());
         let mut head_slice = [0u8; 32];
         head_slice.copy_from_slice(head_hash.as_slice());
+        let reth_cli = Arc::new(reth_cli);
         Self {
             safe_hash: safe_slice,
             head_hash: head_slice,
-            reth_cli
+            reth_cli: reth_cli.clone(),
+            consensus_engine: ConsensusEngine::init(node_config, reth_cli, safe_hash, head_hash),
         }
     }
 
     async fn run(mut self) {
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-            let txns = self.reth_cli.request_transactions(self.safe_hash, self.head_hash).await;
-            self.reth_cli.send_ordered_block(txns).await;
-            let hash = self.reth_cli.recv_executed_block_hash().await;
-            self.reth_cli.commit_block_hash(vec![hash]).await;
-            self.safe_hash = hash;
-            self.head_hash = hash;
+            // let txns = self.reth_cli.request_transactions(self.safe_hash, self.head_hash).await;
+            // self.reth_cli.send_ordered_block(txns).await;
+            // let hash = self.reth_cli.recv_executed_block_hash().await;
+            // self.reth_cli.commit_block_hash(vec![hash]).await;
+            // self.safe_hash = hash;
+            // self.head_hash = hash;
         }
     }
 }
@@ -72,7 +77,7 @@ fn run_server() {
 
     if let Err(err) = {
         let cli = Cli::<DefaultChainSpecParser, EngineArgs>::parse();
-        // let gcei_config = check_bootstrap_config(cli.gravity_node_config.node_config_path.clone());
+        let gcei_config = check_bootstrap_config(cli.gravity_node_config.node_config_path.clone());
         cli.run(|builder, engine_args| async move {
             let handle = builder
                 .with_types_and_provider::<EthereumNode, BlockchainProvider2<_>>()
@@ -88,13 +93,13 @@ fn run_server() {
                 })
                 .await?;
             let client = handle.node.engine_http_client();
-            let genesis = handle.node.chain_spec().genesis();
+            let genesis = handle.node.chain_spec().genesis().clone();
             let head_hash = handle.node.provider.block_by_id(BlockId::Number(BlockNumberOrTag::Latest)).unwrap().unwrap().hash_slow();
-            let safe_hash = handle.node.provider.block_by_id(BlockId::Number(BlockNumberOrTag::Finalized)).unwrap().unwrap().hash_slow();
+            let safe_hash = handle.node.provider.block_by_id(BlockId::Number(BlockNumberOrTag::Safe)).unwrap().unwrap().hash_slow();
             let id = handle.node.chain_spec().chain().id();
             let _ = thread::spawn(move || {
                 let mut cl =
-                    TestConsensusLayer::new(RethCli::new(client, id), safe_hash, head_hash);
+                    TestConsensusLayer::new(RethCli::new(client, id), gcei_config, safe_hash.into(), head_hash.into());
                 tokio::runtime::Runtime::new()
                     .unwrap()
                     .block_on(cl.run());

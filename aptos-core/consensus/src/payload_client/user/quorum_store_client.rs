@@ -5,6 +5,8 @@ use crate::{
     block_storage::BlockStore, counters::WAIT_FOR_FULL_BLOCKS_TRIGGERED, error::QuorumStoreError,
     monitor, payload_client::user::UserPayloadClient,
 };
+
+use api_types::{BatchClient, ConsensusApi};
 use aptos_consensus_types::{
     common::{Payload, PayloadFilter},
     request_response::{GetPayloadCommand, GetPayloadResponse},
@@ -12,8 +14,11 @@ use aptos_consensus_types::{
 use aptos_logger::info;
 use aptos_types::transaction::SignedTransaction;
 use fail::fail_point;
-use futures::future::BoxFuture;
+use futures::{future::BoxFuture, FutureExt, SinkExt};
+use futures_channel::mpsc::SendError;
 use futures_channel::{mpsc, oneshot};
+use once_cell::sync::OnceCell;
+use std::ops::Deref;
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -25,25 +30,6 @@ use tokio::{
 
 const NO_TXN_DELAY: u64 = 30;
 
-pub struct BatchClient {
-    pending_payloads: Mutex<Vec<Vec<SignedTransaction>>>,
-}
-
-impl BatchClient {
-    pub fn new() -> Self {
-        Self { pending_payloads: Mutex::new(vec![]) }
-    }
-
-    pub fn submit(&self, txns: Vec<SignedTransaction>) {
-        self.pending_payloads.blocking_lock().push(txns);
-    }
-
-    pub fn pull(&self) -> Vec<Vec<SignedTransaction>> {
-        let mut payloads = self.pending_payloads.blocking_lock();
-        std::mem::take(&mut *payloads)
-    }
-}
-
 /// Client that pulls blocks from Quorum Store
 #[derive(Clone)]
 pub struct QuorumStoreClient {
@@ -52,9 +38,9 @@ pub struct QuorumStoreClient {
     pull_timeout_ms: u64,
     wait_for_full_blocks_above_recent_fill_threshold: f32,
     wait_for_full_blocks_above_pending_blocks: usize,
-    block_store: Option<Arc<BlockStore>>,
+    block_store: OnceCell<Arc<BlockStore>>,
     batch_client: Arc<BatchClient>,
-    consensus_api_tx: Option<mpsc::Sender<(GetPayloadCommand, [u8; 32], [u8; 32])>>,
+    consensus_engine: OnceCell<Arc<dyn ConsensusApi>>,
 }
 
 impl QuorumStoreClient {
@@ -69,9 +55,9 @@ impl QuorumStoreClient {
             pull_timeout_ms,
             wait_for_full_blocks_above_recent_fill_threshold,
             wait_for_full_blocks_above_pending_blocks,
-            block_store: None,
+            block_store: OnceCell::new(),
             batch_client: Arc::new(BatchClient::new()),
-            consensus_api_tx: None,
+            consensus_engine: OnceCell::new(),
         }
     }
 
@@ -83,12 +69,22 @@ impl QuorumStoreClient {
         self.batch_client.clone()
     }
 
-    pub fn set_consensus_api_tx(&mut self, consensus_api_tx: Option<mpsc::Sender<(GetPayloadCommand, [u8; 32], [u8; 32])>>) {
-        self.consensus_api_tx = consensus_api_tx;
+    pub fn set_consensus_api(&self, consensus_api: Arc<dyn ConsensusApi>) {
+        match self.consensus_engine.set(consensus_api) {
+            Ok(_) => {}
+            Err(_) => {
+                panic!("failed to set consensus api to quorum store client")
+            }
+        }
     }
 
-    pub fn set_block_store(&mut self, block_store: Arc<BlockStore>) {
-        self.block_store = Some(block_store);
+    pub fn set_block_store(&self, block_store: Arc<BlockStore>) {
+        match self.block_store.set(block_store) {
+            Ok(_) => {}
+            Err(_) => {
+                panic!("failed to set block store to quorum store client")
+            }
+        }
     }
 
     async fn pull_internal(
@@ -117,22 +113,42 @@ impl QuorumStoreClient {
             block_timestamp,
         );
         // send to shared mempool
-        // gcei.request_payload(request, id, id).await
-        // 直接callback_rcv.recv即可，正常处理的时候已经通过sender发出去了
-        // self.consensus_api_tx.clone().try_send((req, id, id)).map_err(anyhow::Error::from)?:
-        self.consensus_to_quorum_store_sender.clone().try_send(req).map_err(anyhow::Error::from)?;
+        let mut sender_capture = self.consensus_to_quorum_store_sender.clone();
+        let req_closure: BoxFuture<'static, Result<(), SendError>> =
+            async move { sender_capture.send(req).await }.boxed();
+        let block_tree = self
+            .block_store
+            .get()
+            .expect("block store not set")
+            .as_ref()
+            .get_block_tree();
+
+        let gtxns = self
+            .consensus_engine
+            .get()
+            .expect("consensus engine not set")
+            .as_ref()
+            .request_payload(req_closure, [0; 32], [0; 32])
+            .await
+            .expect("TODO: panic message");
+
+        // TODO(gravity_byteyue: use the following commentted code when qs is ready)
+        let txns: Vec<SignedTransaction> = gtxns.iter().map(|gtxn| gtxn.clone().into()).collect();
+        Ok(Payload::DirectMempool(txns))
+
+        // self.consensus_to_quorum_store_sender.clone().try_send(req).map_err(anyhow::Error::from)?;
         // wait for response
-        match monitor!(
-            "pull_payload",
-            timeout(Duration::from_millis(self.pull_timeout_ms), callback_rcv).await
-        ) {
-            Err(_) => {
-                Err(anyhow::anyhow!("[consensus] did not receive GetBlockResponse on time").into())
-            }
-            Ok(resp) => match resp.map_err(anyhow::Error::from)?? {
-                GetPayloadResponse::GetPayloadResponse(payload) => Ok(payload),
-            },
-        }
+        // match monitor!(
+        //     "pull_payload",
+        //     timeout(Duration::from_millis(self.pull_timeout_ms), callback_rcv).await
+        // ) {
+        //     Err(_) => {
+        //         Err(anyhow::anyhow!("[consensus] did not receive GetBlockResponse on time").into())
+        //     }
+        //     Ok(resp) => match resp.map_err(anyhow::Error::from)?? {
+        //         GetPayloadResponse::GetPayloadResponse(payload) => Ok(payload),
+        //     },
+        // }
     }
 }
 
