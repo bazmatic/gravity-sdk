@@ -27,6 +27,7 @@ use tokio::{
     sync::Mutex,
     time::{sleep, timeout},
 };
+use aptos_crypto::HashValue;
 
 const NO_TXN_DELAY: u64 = 30;
 
@@ -78,6 +79,10 @@ impl QuorumStoreClient {
         }
     }
 
+    pub fn get_block_store(&self) -> Arc<BlockStore> {
+        self.block_store.get().expect("block store not set").clone()
+    }
+
     pub fn set_block_store(&self, block_store: Arc<BlockStore>) {
         match self.block_store.set(block_store) {
             Ok(_) => {}
@@ -85,6 +90,14 @@ impl QuorumStoreClient {
                 panic!("failed to set block store to quorum store client")
             }
         }
+    }
+
+    fn get_safe_block_hash(&self) -> HashValue {
+        self.block_store.get().expect("block store not set").get_safe_block_hash()
+    }
+
+    fn get_head_block_hash(&self) -> HashValue {
+        self.block_store.get().expect("block store not set").get_head_block_hash()
     }
 
     async fn pull_internal(
@@ -123,18 +136,22 @@ impl QuorumStoreClient {
             .as_ref()
             .get_block_tree();
 
-        let gtxns = self
+        let mut safe_hash = [0u8; 32];
+        safe_hash.copy_from_slice(self.get_safe_block_hash().as_ref());
+        let mut head_hash = [0u8; 32];
+        head_hash.copy_from_slice(self.get_head_block_hash().as_ref());
+        let block_batch = self
             .consensus_engine
             .get()
             .expect("consensus engine not set")
             .as_ref()
-            .request_payload(req_closure, [0; 32], [0; 32])
+            .request_payload(req_closure, safe_hash, head_hash)
             .await
             .expect("TODO: panic message");
 
         // TODO(gravity_byteyue: use the following commentted code when qs is ready)
-        let txns: Vec<SignedTransaction> = gtxns.iter().map(|gtxn| gtxn.clone().into()).collect();
-        Ok(Payload::DirectMempool(txns))
+        let txns: Vec<SignedTransaction> = block_batch.txns.iter().map(|gtxn| gtxn.clone().into()).collect();
+        Ok(Payload::DirectMempool((HashValue::new(block_batch.block_hash), txns)))
 
         // self.consensus_to_quorum_store_sender.clone().try_send(req).map_err(anyhow::Error::from)?;
         // wait for response
