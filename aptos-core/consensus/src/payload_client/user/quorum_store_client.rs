@@ -6,11 +6,12 @@ use crate::{
     monitor, payload_client::user::UserPayloadClient,
 };
 
-use api_types::{BatchClient, ConsensusApi};
+use api_types::{BatchClient, BlockHashState, ConsensusApi};
 use aptos_consensus_types::{
     common::{Payload, PayloadFilter},
     request_response::{GetPayloadCommand, GetPayloadResponse},
 };
+use aptos_crypto::HashValue;
 use aptos_logger::info;
 use aptos_types::transaction::SignedTransaction;
 use fail::fail_point;
@@ -18,7 +19,7 @@ use futures::{future::BoxFuture, FutureExt, SinkExt};
 use futures_channel::mpsc::SendError;
 use futures_channel::{mpsc, oneshot};
 use once_cell::sync::OnceCell;
-use std::ops::Deref;
+use std::fmt::Debug;
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -27,9 +28,17 @@ use tokio::{
     sync::Mutex,
     time::{sleep, timeout},
 };
-use aptos_crypto::HashValue;
 
 const NO_TXN_DELAY: u64 = 30;
+
+pub fn debug_block_hash_state(state: &BlockHashState) -> String {
+    format!(
+        "safe_hash: {:?}, head_hash: {:?}, finalized_hash: {:?}",
+        HashValue::new(state.safe_hash),
+        HashValue::new(state.head_hash),
+        HashValue::new(state.finalized_hash),
+    )
+}
 
 /// Client that pulls blocks from Quorum Store
 #[derive(Clone)]
@@ -42,7 +51,7 @@ pub struct QuorumStoreClient {
     block_store: OnceCell<Arc<BlockStore>>,
     batch_client: Arc<BatchClient>,
     consensus_engine: OnceCell<Arc<dyn ConsensusApi>>,
-    init_hash: Arc<Mutex<Option<(HashValue, HashValue)>>>
+    init_hash: Arc<Mutex<Option<BlockHashState>>>,
 }
 
 impl QuorumStoreClient {
@@ -60,7 +69,7 @@ impl QuorumStoreClient {
             block_store: OnceCell::new(),
             batch_client: Arc::new(BatchClient::new()),
             consensus_engine: OnceCell::new(),
-            init_hash: Arc::new(Mutex::new(None))
+            init_hash: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -85,9 +94,12 @@ impl QuorumStoreClient {
         self.block_store.get().expect("block store not set").clone()
     }
 
-    pub fn set_init_reth_hash(&self, safe_hash: HashValue, head_hash: HashValue) {
+    pub fn set_init_reth_hash(
+        &self,
+        block_hash_state: BlockHashState,
+    ) {
         let mut hash = self.init_hash.blocking_lock();
-        *hash = Some((safe_hash, head_hash));
+        *hash = Some(block_hash_state);
     }
 
     pub fn set_block_store(&self, block_store: Arc<BlockStore>) {
@@ -105,6 +117,10 @@ impl QuorumStoreClient {
 
     fn get_head_block_hash(&self) -> HashValue {
         self.block_store.get().expect("block store not set").get_head_block_hash()
+    }
+
+    fn get_finalized_block_hash(&self) -> HashValue {
+        self.block_store.get().expect("block store not set").get_finalize_hash()
     }
 
     async fn pull_internal(
@@ -136,23 +152,20 @@ impl QuorumStoreClient {
         let mut sender_capture = self.consensus_to_quorum_store_sender.clone();
         let req_closure: BoxFuture<'static, Result<(), SendError>> =
             async move { sender_capture.send(req).await }.boxed();
-        let block_tree = self
-            .block_store
-            .get()
-            .expect("block store not set")
-            .as_ref()
-            .get_block_tree();
-
+        let block_tree =
+            self.block_store.get().expect("block store not set").as_ref().get_block_tree();
 
         let mut safe_hash = [0u8; 32];
         let mut head_hash = [0u8; 32];
+        let mut finalized_hash = [0u8; 32];
         {
             let init_hash = self.init_hash.lock().await;
 
             if self.block_store.get().is_none() {
                 info!("request payload from init hash without block store");
-                safe_hash.copy_from_slice(init_hash.unwrap().0.as_slice());
-                head_hash.copy_from_slice(init_hash.unwrap().1.as_slice());
+                finalized_hash.copy_from_slice(init_hash.unwrap().finalized_hash.as_slice());
+                safe_hash.copy_from_slice(init_hash.unwrap().safe_hash.as_slice());
+                head_hash.copy_from_slice(init_hash.unwrap().head_hash.as_slice());
             } else {
                 let block_store = self.block_store.get().unwrap();
                 loop {
@@ -161,19 +174,31 @@ impl QuorumStoreClient {
                         break;
                     }
                     tokio::time::sleep(Duration::from_secs(1)).await
-
                 }
                 if block_store.get_block_tree().read().block_size() <= 1 {
-                    info!("request payload from init hash with only genesis, init hash {:?}", init_hash);
-                    safe_hash.copy_from_slice(init_hash.unwrap().0.as_slice());
-                    head_hash.copy_from_slice(init_hash.unwrap().1.as_slice());
-                    info!("request payload, init hash {:?}, safe {:?}, head {:?}", init_hash, safe_hash, head_hash);
+                    info!(
+                        "request payload from init hash with only genesis, init hash {:?}",
+                        debug_block_hash_state(init_hash.as_ref().expect("empty init hash"))
+                    );
+                    finalized_hash.copy_from_slice(init_hash.unwrap().finalized_hash.as_slice());
+                    safe_hash.copy_from_slice(init_hash.unwrap().safe_hash.as_slice());
+                    head_hash.copy_from_slice(init_hash.unwrap().head_hash.as_slice());
+                    info!(
+                        "request payload, init hash {:?}",
+                        debug_block_hash_state(init_hash.as_ref().expect("empty init hash"))
+                    );
                 } else if block_store.get_block_tree().read().block_size() == 2 {
                     info!("request payload from init hash with one valid block");
-                    safe_hash.copy_from_slice(init_hash.unwrap().0.as_slice());
+                    finalized_hash.copy_from_slice(init_hash.unwrap().finalized_hash.as_slice());
+                    safe_hash.copy_from_slice(self.get_safe_block_hash().as_ref());
+                    head_hash.copy_from_slice(self.get_head_block_hash().as_ref());
+                } else if block_store.get_block_tree().read().block_size() == 3 {
+                    finalized_hash.copy_from_slice(init_hash.unwrap().finalized_hash.as_slice());
+                    safe_hash.copy_from_slice(self.get_safe_block_hash().as_ref());
                     head_hash.copy_from_slice(self.get_head_block_hash().as_ref());
                 } else {
                     info!("request payload from block store with two or more valid block");
+                    finalized_hash.copy_from_slice(self.get_finalized_block_hash().as_ref());
                     safe_hash.copy_from_slice(self.get_safe_block_hash().as_ref());
                     head_hash.copy_from_slice(self.get_head_block_hash().as_ref());
                 }
@@ -185,12 +210,13 @@ impl QuorumStoreClient {
             .get()
             .expect("consensus engine not set")
             .as_ref()
-            .request_payload(req_closure, safe_hash, head_hash)
+            .request_payload(req_closure, BlockHashState { safe_hash, head_hash, finalized_hash })
             .await
             .expect("TODO: panic message");
 
         // TODO(gravity_byteyue: use the following commentted code when qs is ready)
-        let txns: Vec<SignedTransaction> = block_batch.txns.iter().map(|gtxn| gtxn.clone().into()).collect();
+        let txns: Vec<SignedTransaction> =
+            block_batch.txns.iter().map(|gtxn| gtxn.clone().into()).collect();
         Ok(Payload::DirectMempool((HashValue::new(block_batch.block_hash), txns)))
 
         // self.consensus_to_quorum_store_sender.clone().try_send(req).map_err(anyhow::Error::from)?;
@@ -243,7 +269,8 @@ impl UserPayloadClient for QuorumStoreClient {
 
         let payload = loop {
             // Make sure we don't wait more than expected, due to thread scheduling delays/processing time consumed
-            let done = start_time.elapsed() >= max_poll_time;
+            // let done = start_time.elapsed() >= max_poll_time;
+            let done = true;
             let payload = self
                 .pull_internal(
                     max_items,

@@ -1,6 +1,6 @@
-use std::{future::IntoFuture, sync::Arc, time::Duration};
+use std::{future::IntoFuture, hash::Hash, sync::Arc, time::Duration};
 
-use crate::{ 
+use crate::{
     bootstrap::{
         init_gravity_db, init_mempool, init_network_interfaces, init_peers_and_metadata,
         start_consensus,
@@ -9,20 +9,16 @@ use crate::{
     logger,
     network::{create_network_runtime, extract_network_configs},
 };
-use api_types::{BlockBatch, ConsensusApi, ExecutionApi, GTxn};
-use aptos_config::{config::NodeConfig, network_id::NetworkId};
-use aptos_consensus::{
-    gravity_state_computer::ConsensusAdapterArgs,
-};
 use api_types::BatchClient;
+use api_types::{BlockBatch, BlockHashState, ConsensusApi, ExecutionApi, GTxn};
+use aptos_config::{config::NodeConfig, network_id::NetworkId};
+use aptos_consensus::gravity_state_computer::ConsensusAdapterArgs;
 use aptos_event_notifications::EventNotificationSender;
 use aptos_logger::info;
 use aptos_network_builder::builder::NetworkBuilder;
 use aptos_storage_interface::DbReaderWriter;
 use async_trait::async_trait;
-use futures::{
-    channel::mpsc::SendError,
-};
+use futures::channel::mpsc::SendError;
 
 use aptos_crypto::{HashValue, PrivateKey, Uniform};
 use aptos_types::{
@@ -40,9 +36,12 @@ pub struct ConsensusEngine {
     runtime_vec: Vec<Runtime>,
 }
 
-
 impl ConsensusEngine {
-    pub fn init(node_config: NodeConfig, execution_api: Arc<dyn ExecutionApi>, safe_hash: [u8; 32], head_hash: [u8; 32]) -> Arc<Self> {
+    pub fn init(
+        node_config: NodeConfig,
+        execution_api: Arc<dyn ExecutionApi>,
+        block_hash_state: BlockHashState,
+    ) -> Arc<Self> {
         let gravity_db = init_gravity_db(&node_config);
         let peers_and_metadata = init_peers_and_metadata(&node_config, &gravity_db);
         let (_remote_log_receiver, _logger_filter_update) =
@@ -131,8 +130,7 @@ impl ConsensusEngine {
             &mut args,
         );
         network_runtimes.push(consensus_runtime);
-        let quorum_store_client =
-            args.quorum_store_client.as_mut().unwrap();
+        let quorum_store_client = args.quorum_store_client.as_mut().unwrap();
         // trigger this to make epoch manager invoke new epoch
         let arc_self = Arc::new(Self {
             address: node_config.validator_network.as_ref().unwrap().listen_address.to_string(),
@@ -142,7 +140,11 @@ impl ConsensusEngine {
         });
         quorum_store_client.set_consensus_api(arc_self.clone());
         // sleep
-        quorum_store_client.set_init_reth_hash(HashValue::new(safe_hash), HashValue::new(head_hash));
+        quorum_store_client.set_init_reth_hash(block_hash_state);
+        // Wait for the network to be done
+        arc_self.runtime_vec.last().as_ref().expect("msg").block_on(async move {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        });
         // process new round should be after init reth hash
         let _ = event_subscription_service.notify_initial_configs(1_u64);
 
@@ -156,15 +158,18 @@ impl ConsensusApi for ConsensusEngine {
     async fn request_payload<'a, 'b>(
         &'a self,
         closure: BoxFuture<'b, Result<(), SendError>>,
-        safe_block_hash: [u8; 32],
-        head_block_hash: [u8; 32],
-    ) -> Result<BlockBatch, SendError>
-    {
+        state_block_hash: BlockHashState,
+    ) -> Result<BlockBatch, SendError> {
         // let txns = self.execution_api.request_transactions(safe_block_hash, head_block_hash).await;
         // self.batch_client.submit(txns);
         // closure.await
-
-        Ok(self.execution_api.request_block_batch(safe_block_hash, head_block_hash).await)
+        info!(
+            "request_payload, safe {:?}, head {:?}, finalized {:?}",
+            HashValue::new(state_block_hash.safe_hash),
+            HashValue::new(state_block_hash.head_hash),
+            HashValue::new(state_block_hash.finalized_hash)
+        );
+        Ok(self.execution_api.request_block_batch(state_block_hash).await)
     }
 
     async fn send_order_block(&self, txns: Vec<GTxn>) {
@@ -186,14 +191,20 @@ impl ConsensusApi for ConsensusEngine {
         //     };
         //     return_txns[txn.g_ext().txn_index_in_block as usize] = gtxn;
         // });
+        info!("send_order_block");
         self.execution_api.send_ordered_block(txns).await
     }
 
     async fn recv_executed_block_hash(&self) -> [u8; 32] {
+        info!("recv_executed_block_hash");
         self.execution_api.recv_executed_block_hash().await
     }
 
     async fn commit_block_hash(&self, block_ids: Vec<[u8; 32]>) {
+        info!(
+            "commit_block_hash {:?}",
+            block_ids.iter().map(|id| { HashValue::new(*id) }).collect::<Vec<_>>()
+        );
         self.execution_api.commit_block_hash(block_ids).await
     }
 }
