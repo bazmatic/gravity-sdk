@@ -731,7 +731,6 @@ impl RoundManager {
                 (true, nil_vote)
             },
         };
-
         if !timeout_vote.is_timeout() {
             let timeout = timeout_vote
                 .generate_2chain_timeout(self.block_store.highest_quorum_cert().as_ref().clone());
@@ -1517,7 +1516,7 @@ impl RoundManager {
                     };
                 },
                 (peer_id, event) = event_rx.select_next_some() => {
-                    debug!("receive event {:?}", event);
+                    info!("receive event {:?}", event);
                     let result = match event {
                         VerifiedEvent::VoteMsg(vote_msg) => {
                             monitor!("process_vote", self.process_vote_msg(*vote_msg).await)
@@ -1526,10 +1525,11 @@ impl RoundManager {
                             monitor!("process_order_vote", self.process_order_vote_msg(*order_vote_msg).await)
                         }
                         VerifiedEvent::UnverifiedSyncInfo(sync_info) => {
-                            monitor!(
+                            let res =monitor!(
                                 "process_sync_info",
                                 self.process_sync_info_msg(*sync_info, peer_id).await
-                            )
+                            );
+                            res
                         }
                         VerifiedEvent::LocalTimeout(round) => monitor!(
                             "process_local_timeout",

@@ -152,9 +152,6 @@ impl QuorumStoreClient {
         let mut sender_capture = self.consensus_to_quorum_store_sender.clone();
         let req_closure: BoxFuture<'static, Result<(), SendError>> =
             async move { sender_capture.send(req).await }.boxed();
-        let block_tree =
-            self.block_store.get().expect("block store not set").as_ref().get_block_tree();
-
         let mut safe_hash = [0u8; 32];
         let mut head_hash = [0u8; 32];
         let mut finalized_hash = [0u8; 32];
@@ -168,39 +165,41 @@ impl QuorumStoreClient {
                 head_hash.copy_from_slice(init_hash.unwrap().head_hash.as_slice());
             } else {
                 let block_store = self.block_store.get().unwrap();
-                loop {
-                    info!("wait last block qc");
-                    if block_store.get_block_tree().read().is_last_block_qc() {
-                        break;
+                info!("reuse payload from block store if the last block qc is not ready");
+                // TODO(gravity_byteyue): avoid clone here
+                if !block_store.get_block_tree().read().is_head_block_qc() {
+                    let block = block_store.get_block_tree().read().get_head_block().clone();
+                    match block.payload() {
+                        Some(payload) => {
+                            return Ok(payload.clone());
+                        },
+                        None => {
+                            panic!("block payload is empty {:?}", block);
+                        }
                     }
-                    tokio::time::sleep(Duration::from_secs(1)).await
                 }
-                if block_store.get_block_tree().read().block_size() <= 1 {
-                    info!(
-                        "request payload from init hash with only genesis, init hash {:?}",
-                        debug_block_hash_state(init_hash.as_ref().expect("empty init hash"))
+                let is_head_invalid = block_store.get_block_tree().read().is_head_block_payload_none();
+                let is_safe_invalid = block_store.get_block_tree().read().is_safe_block_payload_none();
+                let is_finalized_invalid = block_store.get_block_tree().read().is_finalized_block_payload_none();
+                info!(
+                        "request payload, head nil: {}, safe nil: {}, finalized nil: {}",
+                        is_head_invalid, is_safe_invalid, is_finalized_invalid
                     );
+                if is_head_invalid && is_safe_invalid && is_finalized_invalid {
                     finalized_hash.copy_from_slice(init_hash.unwrap().finalized_hash.as_slice());
                     safe_hash.copy_from_slice(init_hash.unwrap().safe_hash.as_slice());
                     head_hash.copy_from_slice(init_hash.unwrap().head_hash.as_slice());
-                    info!(
-                        "request payload, init hash {:?}",
-                        debug_block_hash_state(init_hash.as_ref().expect("empty init hash"))
-                    );
-                } else if block_store.get_block_tree().read().block_size() == 2 {
-                    info!("request payload from init hash with one valid block");
+                } else if is_finalized_invalid && !is_safe_invalid && !is_head_invalid {
+                    // head block qc means the safe block qc, too
                     finalized_hash.copy_from_slice(init_hash.unwrap().finalized_hash.as_slice());
                     safe_hash.copy_from_slice(self.get_safe_block_hash().as_ref());
                     head_hash.copy_from_slice(self.get_head_block_hash().as_ref());
-                } else if block_store.get_block_tree().read().block_size() == 3 {
-                    finalized_hash.copy_from_slice(init_hash.unwrap().finalized_hash.as_slice());
-                    safe_hash.copy_from_slice(self.get_safe_block_hash().as_ref());
-                    head_hash.copy_from_slice(self.get_head_block_hash().as_ref());
-                } else {
-                    info!("request payload from block store with two or more valid block");
+                } else if !is_finalized_invalid && !is_safe_invalid && !is_head_invalid {
                     finalized_hash.copy_from_slice(self.get_finalized_block_hash().as_ref());
                     safe_hash.copy_from_slice(self.get_safe_block_hash().as_ref());
                     head_hash.copy_from_slice(self.get_head_block_hash().as_ref());
+                } else {
+                    panic!("invalid block state with head nil: {}, safe nil: {}, finalized nil: {}", is_head_invalid, is_safe_invalid, is_finalized_invalid);
                 }
             }
         }
