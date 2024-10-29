@@ -117,13 +117,10 @@ impl PipelinedBlock {
 
         let mut to_commit = 0;
         let mut to_retry = 0;
-        for txn in self.state_compute_result.compute_status_for_input_txns() {
-            match txn {
-                TransactionStatus::Keep(_) => to_commit += 1,
-                TransactionStatus::Retry => to_retry += 1,
-                _ => {},
-            }
-        }
+
+        to_commit += self.block.payload().map_or(0, |payload| {
+            payload.len() as u64
+        });
 
         let execution_summary = ExecutionSummary {
             payload_len: self
@@ -271,7 +268,6 @@ impl PipelinedBlock {
 
     pub fn vote_proposal(&self) -> VoteProposal {
         VoteProposal::new(
-            self.compute_result().extension_proof(),
             self.block.clone(),
             self.compute_result().epoch_state().clone(),
             true,
@@ -284,20 +280,14 @@ impl PipelinedBlock {
 
     pub fn subscribable_events(&self) -> Vec<ContractEvent> {
         // reconfiguration suffix don't count, the state compute result is carried over from parents
-        if self.is_reconfiguration_suffix() {
-            return vec![];
-        }
-        self.state_compute_result.subscribable_events().to_vec()
+        // TODO(gravity_byteyue): we should have a better way to identify reconfiguration suffix
+        vec![]
     }
 
     /// The block is suffix of a reconfiguration block if the state result carries over the epoch state
     /// from parent but has no transaction.
     pub fn is_reconfiguration_suffix(&self) -> bool {
         self.state_compute_result.has_reconfiguration()
-            && self
-                .state_compute_result
-                .compute_status_for_input_txns()
-                .is_empty()
     }
 
     pub fn elapsed_in_pipeline(&self) -> Option<Duration> {
