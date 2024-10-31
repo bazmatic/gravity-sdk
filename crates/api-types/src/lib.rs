@@ -11,7 +11,7 @@ use tokio::{runtime::Runtime, sync::Mutex};
 pub struct BlockHashState {
     pub safe_hash: [u8; 32],
     pub head_hash: [u8; 32],
-    pub finalized_hash: [u8; 32]
+    pub finalized_hash: [u8; 32],
 }
 
 #[async_trait]
@@ -49,6 +49,14 @@ pub trait ExecutionApi: Send + Sync {
 
     // this function is called by the execution layer commit the block hash
     async fn commit_block_hash(&self, block_ids: Vec<[u8; 32]>);
+
+    fn latest_block_number(&self) -> u64;
+
+    async fn recover_ordered_block(
+        &self,
+        block: Vec<GTxn>,
+        res: [u8; 32],
+    );
 }
 
 #[derive(Clone, Default)]
