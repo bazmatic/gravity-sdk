@@ -41,6 +41,7 @@ impl ConsensusEngine {
         node_config: NodeConfig,
         execution_api: Arc<dyn ExecutionApi>,
         block_hash_state: BlockHashState,
+        chain_id: u64,
     ) -> Arc<Self> {
         let gravity_db = init_gravity_db(&node_config);
         let peers_and_metadata = init_peers_and_metadata(&node_config, &gravity_db);
@@ -59,7 +60,7 @@ impl ConsensusEngine {
         let runtime = create_network_runtime(&network_config);
         // Entering gives us a runtime to instantiate all the pieces of the builder
         let _enter = runtime.enter();
-        let chain_id = ChainId::test();
+        let chain_id = ChainId::from(chain_id);
         let mut network_builder = NetworkBuilder::create(
             chain_id,
             node_config.base.role,
@@ -94,12 +95,10 @@ impl ConsensusEngine {
             peers_and_metadata.clone(),
         );
 
-        let (mempool_client_sender, mempool_client_receiver) = mpsc::channel(1);
-
         let (consensus_to_mempool_sender, consensus_to_mempool_receiver) = mpsc::channel(1);
         // Create notification senders and listeners for mempool, consensus and the storage service
         // For Gravity we only use it to notify the mempool for the committed txn gc logic
-        let mut args = ConsensusAdapterArgs::new(mempool_client_sender, execution_api.clone());
+        let mut args = ConsensusAdapterArgs::new(execution_api.clone());
         let (consensus_runtime, _, _, execution_proxy) = start_consensus(
             &node_config,
             &mut event_subscription_service,
