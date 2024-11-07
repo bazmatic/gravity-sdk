@@ -6,10 +6,18 @@ use std::{
     thread,
 };
 
+use crate::{
+    network::{
+        build_network_interfaces, consensus_network_configuration, extract_network_ids,
+    },
+    storage::{self, db::GravityDB},
+};
+use api_types::ExecutionApi;
 use aptos_config::{
     config::{NetworkConfig, NodeConfig, Peer, PeerRole, RocksdbConfigs, StorageDirPaths},
     network_id::NetworkId,
 };
+use aptos_consensus::gravity_state_computer::GravityExecutionProxy;
 use aptos_consensus::{
     gravity_state_computer::ConsensusAdapterArgs, network_interface::ConsensusMsg,
     persistent_liveness_storage::StorageWriteProxy, quorum_store::quorum_store_db::QuorumStoreDB,
@@ -30,17 +38,6 @@ use aptos_validator_transaction_pool::VTxnPoolState;
 use futures::channel::mpsc::{Receiver, Sender};
 use serde::{Deserialize, Serialize};
 use tokio::runtime::Runtime;
-use api_types::ExecutionApi;
-use aptos_consensus::gravity_state_computer::GravityExecutionProxy;
-use crate::{
-    network::{
-        build_network_interfaces, consensus_network_configuration, extract_network_ids,
-        mempool_network_configuration,
-    },
-    storage::{self, db::GravityDB},
-    GravityConsensusEngineInterface,
-};
-use crate::consensus_api::ConsensusEngine;
 
 pub struct ApplicationNetworkInterfaces<T> {
     pub network_client: NetworkClient<T>,
@@ -111,10 +108,7 @@ pub fn start_node_inspection_service(
     node_config: &NodeConfig,
     peers_and_metadata: Arc<PeersAndMetadata>,
 ) {
-    aptos_inspection_service::start_inspection_service(
-        node_config.clone(),
-        peers_and_metadata,
-    )
+    aptos_inspection_service::start_inspection_service(node_config.clone(), peers_and_metadata)
 }
 
 pub fn start_consensus(
@@ -176,12 +170,28 @@ pub fn init_peers_and_metadata(
     gravity_db: &GravityDB,
 ) -> Arc<PeersAndMetadata> {
     let listen_address = node_config.validator_network.as_ref().unwrap().listen_address.to_string();
-    let gravity_node_config = gravity_db.mock_db.node_config_set.get(&listen_address).unwrap();
+    let gravity_node_config = gravity_db
+        .mock_db
+        .node_config_set
+        .get(&listen_address)
+        .expect(&format!("addr {:?} has no config", listen_address));
     let network_ids = extract_network_ids(node_config);
     let peers_and_metadata = PeersAndMetadata::new(&network_ids);
     let mut peer_set = HashMap::new();
     for trusted_peer in &gravity_node_config.trusted_peers_map {
-        let trusted_peer_config = gravity_db.mock_db.node_config_set.get(trusted_peer).unwrap();
+        let trusted_peer_config = gravity_db
+            .mock_db
+            .node_config_set
+            .get(trusted_peer)
+            .or_else(|| {
+                gravity_db
+                    .mock_db
+                    .node_config_set
+                    .iter()
+                    .map(|(_, config)| config)
+                    .find(|config| config.public_ip_address == *trusted_peer)
+            })
+            .expect(&format!("NodeConfig for {:?} not found", trusted_peer));
         let mut set = HashSet::new();
         let trusted_peer_private_key =
             x25519::PrivateKey::try_from(trusted_peer_config.network_private_key.as_slice())
