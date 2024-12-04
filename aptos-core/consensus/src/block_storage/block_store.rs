@@ -290,7 +290,7 @@ impl BlockStore {
             blocks.push(p_block.as_ref().into());
         }
         if blocks.len() != 0 {
-            self.storage.save_tree(blocks, vec![]);
+            self.storage.save_tree(blocks, vec![]).unwrap();
         }
     }
 
