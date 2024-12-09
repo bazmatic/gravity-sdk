@@ -26,6 +26,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
+use coex_bridge::get_coex_bridge;
 
 #[derive(Debug)]
 pub enum ProofManagerCommand {

@@ -60,6 +60,7 @@ use reth_node_core::args::utils::DefaultChainSpecParser;
 use reth_node_ethereum::{node::EthereumAddOns, EthereumNode};
 use reth_provider::providers::BlockchainProvider2;
 use reth_rpc_api::EngineEthApiClient;
+use coex_bridge::{get_coex_bridge, Func};
 
 struct TestConsensusLayer<T> {
     safe_hash: [u8; 32],
@@ -170,5 +171,9 @@ fn run_server() {
 }
 
 fn main() {
+    get_coex_bridge().register("test_info".to_string(), Func::TestInfo(coex_bridge::call::Call::new(|mess| {
+        info!("test_info: {:?}", mess);
+        Ok(())
+    } )));
     run_server();
 }
