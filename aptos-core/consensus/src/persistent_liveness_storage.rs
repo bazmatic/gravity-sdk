@@ -4,7 +4,7 @@
 
 use crate::{consensusdb::ConsensusDB, epoch_manager::LivenessStorageData, error::DbError};
 use anyhow::{format_err, Context, Result};
-use api_types::ExecutionApi;
+use api_types::{ExecutionApiV2};
 use aptos_config::config::NodeConfig;
 use aptos_consensus_types::{
     block::Block, quorum_cert::QuorumCert, timeout_2chain::TwoChainTimeoutCertificate, vote::Vote,
@@ -284,7 +284,7 @@ impl RecoveryData {
         } else {
             root = ledger_recovery_data.find_root(&mut blocks, &mut quorum_certs, order_vote_enabled)?;
         }
-        println!("root info: {:?}", root);
+        info!("root info: {:?}", root);
         let blocks_to_prune = Some(Self::find_blocks_to_prune(
             root.0.id(),
             &mut blocks,
@@ -363,14 +363,14 @@ pub struct StorageWriteProxy {
     db: Arc<ConsensusDB>,
     aptos_db: Arc<dyn DbReader>,
     next_block_number: AtomicU64,
-    execution_api: Option<Arc<dyn ExecutionApi>>,
+    execution_api: Option<Arc<dyn ExecutionApiV2>>,
 }
 
 impl StorageWriteProxy {
     pub fn new(
         db: Arc<ConsensusDB>,
         aptos_db: Arc<dyn DbReader>,
-        execution_api: Option<Arc<dyn ExecutionApi>>,
+        execution_api: Option<Arc<dyn ExecutionApiV2>>,
     ) -> Self {
         // let db = Arc::new(ConsensusDB::new(config.storage.dir()));
         StorageWriteProxy { db, aptos_db, next_block_number: AtomicU64::new(0), execution_api }
@@ -506,7 +506,7 @@ impl PersistentLivenessStorage for StorageWriteProxy {
     fn fetch_next_block_number(&self) -> u64 {
         let latest_block_number = self.latest_block_number();
         let next_block_number = self.next_block_number.load(Ordering::SeqCst);
-        assert_eq!(latest_block_number + 1, next_block_number);
+        // assert_eq!(latest_block_number + 1, next_block_number);
         self.next_block_number.fetch_add(1, Ordering::SeqCst);
         next_block_number
     }

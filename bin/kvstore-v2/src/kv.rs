@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
-use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::mpsc::Receiver;
 use tokio::sync::Mutex;
 use api_types::{BlockBatch, ComputeRes, ExecError, ExecTxn, ExecutionApiV2, ExecutionBlocks, ExternalBlock, ExternalBlockMeta, ExternalPayloadAttr, GTxn, VerifiedTxn};
 use crate::stateful_mempool::Mempool;
@@ -111,7 +111,7 @@ impl ExecutionApiV2 for KvStore {
         let res = receiver.recv().await;
         match res {
             Some(r) => Ok(r),
-            None => todo!(),
+            None => Err(ExecError::InternalError),
         }
     }
 
@@ -121,5 +121,29 @@ impl ExecutionApiV2 for KvStore {
             self.mempool.remove_txn(txn).await
         }
         Ok(())
+    }
+
+    fn latest_block_number(&self) -> u64 {
+        0
+    }
+
+    fn finalized_block_number(&self) -> u64 {
+        0
+    }
+
+    async fn recover_ordered_block(&self, block_batch: BlockBatch) {
+        todo!()
+    }
+
+    async fn recover_execution_blocks(&self, blocks: ExecutionBlocks) {
+        todo!()
+    }
+
+    fn get_blocks_by_range(
+        &self,
+        start_block_number: u64,
+        end_block_number: u64,
+    ) -> ExecutionBlocks {
+        todo!()
     }
 }

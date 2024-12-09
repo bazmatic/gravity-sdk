@@ -17,7 +17,6 @@ use crate::{
         types::{Batch, BatchResponse},
     }, round_manager::VerifiedEvent
 };
-use api_types::BatchClient;
 use aptos_channels::{aptos_channel, message_queues::QueueStyle};
 use aptos_config::config::{QuorumStoreConfig, SecureBackend};
 use aptos_consensus_types::{
@@ -143,7 +142,6 @@ pub struct InnerBuilder {
     batch_store: Option<Arc<BatchStore>>,
     batch_reader: Option<Arc<dyn BatchReader>>,
     broadcast_proofs: bool,
-    batch_client: Arc<BatchClient>,
 }
 
 impl InnerBuilder {
@@ -162,7 +160,6 @@ impl InnerBuilder {
         backend: SecureBackend,
         quorum_store_storage: Arc<dyn QuorumStoreStorage>,
         broadcast_proofs: bool,
-        batch_client: Arc<BatchClient>,
     ) -> Self {
         let (coordinator_tx, coordinator_rx) = futures_channel::mpsc::channel(config.channel_size);
         let (batch_generator_cmd_tx, batch_generator_cmd_rx) =
@@ -218,7 +215,6 @@ impl InnerBuilder {
             batch_store: None,
             batch_reader: None,
             broadcast_proofs,
-            batch_client,
         }
     }
 
@@ -232,7 +228,7 @@ impl InnerBuilder {
             .get(CONSENSUS_KEY)
             .map(|v| v.value)
             .expect("Unable to get private key");
-        println!("private_key {:?}", private_key);
+        info!("private_key {:?}", private_key);
         let signer = ValidatorSigner::new(self.author, private_key);
 
         let latest_ledger_info_with_sigs = self
@@ -303,7 +299,6 @@ impl InnerBuilder {
             self.batch_store.clone().unwrap(),
             self.quorum_store_to_mempool_sender,
             self.mempool_txn_pull_timeout_ms,
-            self.batch_client,
         );
         spawn_named!(
             "batch_generator",
