@@ -15,6 +15,12 @@ pub(crate) struct Cli {
     /// Path to the configuration file
     #[arg(long)]
     pub listen_url: String,
+
+    #[arg(long)]
+    pub log_dir: String,
+
+    #[arg(long)]
+    pub bench: bool,
 }
 
 impl Cli {

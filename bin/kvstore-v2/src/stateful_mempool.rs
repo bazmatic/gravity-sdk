@@ -1,3 +1,4 @@
+use log::{info, warn};
 use tokio::sync::mpsc::error::TryRecvError;
 use crate::txn::RawTxn;
 use api_types::account::{self, ExternalAccountAddress};
@@ -49,7 +50,7 @@ impl Mempool {
                 sender_txns.remove(&seq);
             },
             None => {
-                println!("might be follower");
+                warn!("might be follower");
             },
         }
     }
@@ -116,7 +117,9 @@ impl Mempool {
             Some(receiver.try_recv())
         } {
             match result {
-                Ok(txn) => txns.push(txn),
+                Ok(txn) => {
+                    txns.push(txn)
+                },
                 Err(TryRecvError::Empty) => {
                     break;
                 }

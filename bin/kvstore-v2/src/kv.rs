@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
+use log::info;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::Mutex;
 use api_types::{BlockBatch, ComputeRes, ExecError, ExecTxn, ExecutionApiV2, ExecutionBlocks, ExternalBlock, ExternalBlockMeta, ExternalPayloadAttr, GTxn, VerifiedTxn};

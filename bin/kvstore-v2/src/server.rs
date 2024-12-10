@@ -1,13 +1,15 @@
 use std::sync::Arc;
 
 use api_types::{account::ExternalAccountAddress, ExecTxn, ExecutionApiV2};
+use async_trait::async_trait;
+use log::warn;
 use rand::Rng;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
 };
 
-use crate::{kv::KvStore, txn::RawTxn};
+use crate::{kv::KvStore, server_trait::IServer, txn::RawTxn};
 
 fn generate_random_address() -> ExternalAccountAddress {
     let mut rng = rand::thread_rng();
@@ -18,12 +20,10 @@ pub struct Server {
     kv_store: Arc<KvStore>,
 }
 
-impl Server {
-    pub fn new(kv_store: Arc<KvStore>) -> Self {
-        Self { kv_store }
-    }
+#[async_trait]
+impl IServer for Server {
     /// Starts the TCP server
-    pub async fn start(&self, addr: &str) -> tokio::io::Result<()> {
+    async fn start(&self, addr: &str) -> tokio::io::Result<()> {
         let listener = TcpListener::bind(addr).await?;
 
         loop {
@@ -31,10 +31,20 @@ impl Server {
             let kv_store = self.kv_store.clone();
             tokio::spawn(async move {
                 if let Err(e) = Self::handle_client(kv_store, stream).await {
-                    eprintln!("Error handling client: {:?}", e);
+                    warn!("Error handling client: {:?}", e);
                 }
             });
         }
+    }
+
+    async fn execution_client(&self) -> Arc<dyn ExecutionApiV2> {
+        self.kv_store.clone()
+    }
+}
+
+impl Server {
+    pub fn new() -> Self {
+        Self { kv_store: Arc::new(KvStore::new()), }
     }
 
     /// Handles a single client connection
@@ -54,12 +64,8 @@ impl Server {
                 Some("SET") => {
                     let key = parts.next().unwrap_or("").to_string();
                     let val = parts.next().unwrap_or("").to_string();
-                    let raw_txn = RawTxn {
-                        account: generate_random_address(),
-                        sequence_number: 1,
-                        key,
-                        val,
-                    };
+                    let raw_txn =
+                        RawTxn { account: generate_random_address(), sequence_number: 1, key, val };
                     match kv_store.add_txn(ExecTxn::RawTxn(raw_txn.to_bytes())).await {
                         Ok(_) => reader.get_mut().write_all(b"OK\n").await?,
                         Err(_) => reader.get_mut().write_all(b"FAILED TO SET\n").await?,
