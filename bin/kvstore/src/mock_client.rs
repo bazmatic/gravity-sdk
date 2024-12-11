@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use api::ExecutionApi;
-use api_types::{BlockBatch, BlockHashState, ExecutionBlocks, GTxn};
+use api_types::{BlockBatch, BlockHashState, ExecutionBlocks, ExternalBlock, GTxn};
 use async_trait::async_trait;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::Mutex;
@@ -56,7 +56,7 @@ impl ExecutionApi for MockClient {
         0
     }
 
-    async fn recover_ordered_block(&self, block_batch: BlockBatch) {
+    async fn recover_ordered_block(&self, block_batch: ExternalBlock) {
         unimplemented!("No need for kvstore")
     }
 
