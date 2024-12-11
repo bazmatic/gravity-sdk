@@ -100,16 +100,15 @@ async fn retrieve_from_execution_routine(
         match txns {
             Ok(txns) => {
                 info!("the recv_pending_txns size is {:?}", txns.len());
-                txns.into_iter().for_each(|txn| {
+                txns.into_iter().for_each(|(txn, db_sequence_number)| {
                     let _r = mempool.lock().add_txn(
                         VerifiedTxn {
                             bytes: txn.bytes,
                             sender: AccountAddress::from(txn.sender.bytes()),
-                            txn_sequence_number: txn.txn_sequence_number,
-                            account_latest_committed_sequence_number: txn.account_latest_committed_sequence_number,
+                            sequence_number: txn.sequence_number,
                             chain_id: txn.chain_id.into_u64().into(),
                         },
-                        txn.account_latest_committed_sequence_number.expect("Must set account seq when add txn"),
+                        db_sequence_number,
                         TimelineState::NotReady,
                         true,
                         None,
