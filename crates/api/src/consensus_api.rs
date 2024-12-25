@@ -6,7 +6,7 @@ use crate::{
         start_consensus, start_node_inspection_service,
     }, consensus_mempool_handler::{ConsensusToMempoolHandler, MempoolNotificationHandler}, https::{https_server, HttpsServerArgs}, logger, network::{create_network_runtime, extract_network_configs}
 };
-use api_types::{BlockId, ComputeRes, ConsensusApi, ExecutionLayer, ExternalBlock, ExternalBlockMeta};
+use api_types::{u256_define::BlockId, u256_define::ComputeRes, ConsensusApi, ExecutionLayer, ExternalBlock, ExternalBlockMeta};
 use aptos_config::{config::NodeConfig, network_id::NetworkId};
 use aptos_consensus::gravity_state_computer::ConsensusAdapterArgs;
 use aptos_consensus::consensusdb::ConsensusDB;
@@ -129,7 +129,7 @@ impl ConsensusEngine {
                 && !node_config.https_key_pem_path.to_str().unwrap().is_empty() {
             let args = HttpsServerArgs {
                 address: node_config.https_server_address,
-                execution_api: Some(execution_layer.execution_api.clone()),
+                execution_api: execution_layer.execution_api.clone(),
                 cert_pem: node_config.https_cert_pem_path,
                 key_pem: node_config.https_key_pem_path,
             };
