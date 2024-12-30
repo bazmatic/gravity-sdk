@@ -1,3 +1,4 @@
+use aptos_logger::info;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
@@ -67,10 +68,7 @@ fn load_file(path: &Path) -> GravityNodeConfigSet {
 impl MockStorage {
     pub fn new(path: &Path) -> Self {
         let config_set = load_file(path);
-        Self {
-            node_config_set: config_set,
-            inner: Inner(Arc::new(Mutex::new(HashMap::new()))),
-        }
+        Self { node_config_set: config_set, inner: Inner(Arc::new(Mutex::new(HashMap::new()))) }
     }
 
     pub fn mock_validators(&self) -> Vec<ValidatorInfo> {
@@ -161,8 +159,7 @@ impl DbReader for MockStorage {
                                     main,
                                     quorum_store_enabled,
                                 } => {
-                                    main.proposer_election_type =
-                                        ProposerElectionType::FixedProposer(1);
+                                    main.proposer_election_type = ProposerElectionType::FixedProposer(1);
                                     *quorum_store_enabled = false;
                                 }
                                 ConsensusAlgorithmConfig::DAG(_) => {}
@@ -171,8 +168,7 @@ impl DbReader for MockStorage {
                                     quorum_store_enabled,
                                     order_vote_enabled,
                                 } => {
-                                    main.proposer_election_type =
-                                        ProposerElectionType::FixedProposer(1);
+                                    main.proposer_election_type = ProposerElectionType::FixedProposer(1);
                                     *quorum_store_enabled = false;
                                     *order_vote_enabled = false;
                                 }
