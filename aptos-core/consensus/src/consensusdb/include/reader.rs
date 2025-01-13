@@ -167,6 +167,8 @@ impl DbReader for ConsensusDB {
         };
         Ok(Some(StateValue::new_legacy(bytes.into())))
     }
-}
 
-impl DbWriter for ConsensusDB {}
+    fn get_latest_ledger_infos(&self) -> Vec<LedgerInfoWithSignatures> {
+        self.ledger_db.metadata_db().get_latest_ledger_infos()
+    }
+}

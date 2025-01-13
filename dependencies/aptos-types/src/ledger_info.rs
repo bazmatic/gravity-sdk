@@ -14,13 +14,12 @@ use crate::{
 };
 use aptos_crypto::{bls12381, hash::HashValue};
 use aptos_crypto_derive::{BCSCryptoHash, CryptoHasher};
+use once_cell::sync::OnceCell;
 #[cfg(any(test, feature = "fuzzing"))]
 use proptest_derive::Arbitrary;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeMap,
-    fmt::{Display, Formatter},
-    ops::{Deref, DerefMut},
+    collections::BTreeMap, fmt::{Display, Formatter}, hash::Hash, ops::{Deref, DerefMut}
 };
 
 /// This structure serves a dual purpose.
@@ -44,10 +43,11 @@ use std::{
 #[cfg_attr(any(test, feature = "fuzzing"), derive(Arbitrary))]
 pub struct LedgerInfo {
     commit_info: BlockInfo,
-
     /// Hash of consensus specific data that is opaque to all parts of the system other than
     /// consensus.
     consensus_data_hash: HashValue,
+    block_hash: HashValue,
+    block_number: u64,
 }
 
 impl Display for LedgerInfo {
@@ -66,6 +66,8 @@ impl LedgerInfo {
         Self {
             commit_info: BlockInfo::empty(),
             consensus_data_hash: HashValue::zero(),
+            block_hash: HashValue::zero(),
+            block_number: 0,
         }
     }
 
@@ -78,6 +80,8 @@ impl LedgerInfo {
         Self {
             commit_info,
             consensus_data_hash,
+            block_hash: HashValue::zero(),
+            block_number: 0,
         }
     }
 
@@ -150,6 +154,22 @@ impl LedgerInfo {
     #[cfg(any(test, feature = "fuzzing"))]
     pub fn set_executed_state_id(&mut self, id: HashValue) {
         self.commit_info.set_executed_state_id(id)
+    }
+
+    pub fn set_block_hash(&mut self, block_hash: HashValue) {
+        self.block_hash = block_hash;
+    }
+
+    pub fn set_block_number(&mut self, block_number: u64) {
+        self.block_number = block_number;
+    }
+
+    pub fn block_hash(&self) -> HashValue {
+        self.block_hash
+    }
+
+    pub fn block_number(&self) -> u64 {
+        self.block_number
     }
 }
 
@@ -312,6 +332,14 @@ impl LedgerInfoWithV0 {
 
     pub fn signatures(&self) -> &AggregateSignature {
         &self.signatures
+    }
+
+    pub fn set_block_hash(&mut self, block_hash: HashValue) {
+        self.ledger_info.set_block_hash(block_hash);
+    }
+
+    pub fn set_block_number(&mut self, block_number: u64) {
+        self.ledger_info.set_block_number(block_number);
     }
 }
 
