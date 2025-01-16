@@ -2,7 +2,7 @@
 
 bin_name="pethv2"
 node_arg=""
-bin_version="debug"
+bin_version="release"
 mode="cluster"
 
 while [[ "$#" -gt 0 ]]; do

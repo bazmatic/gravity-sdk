@@ -87,9 +87,11 @@ impl ExecutionApiV2 for RethCoordinator {
     }
 
     async fn recv_pending_txns(&self) -> Result<Vec<VerifiedTxnWithAccountSeqNum>, ExecError> {
+        let now = std::time::Instant::now();
         let mut buffer = self.pending_buffer.lock().await;
-        info!("recv_pending_txns with buffer size: {:?}", buffer.len());
-        let res = buffer.drain(..).collect();
+        let res = std::mem::take(&mut *buffer);
+        
+        info!("recv_pending_txns with buffer size: {:?} in time {:?}", &res.len(), now.elapsed());
         Ok(res)
     }
 
@@ -99,10 +101,9 @@ impl ExecutionApiV2 for RethCoordinator {
         mut ordered_block: ExternalBlock,
     ) -> Result<(), ExecError> {
         info!(
-            "send_ordered_block with parent_id: {:?} and block num {:?}",
-            parent_id, ordered_block.block_meta.block_number
+            "send_ordered_block with parent_id: {:?} and block num {:?} {:?}",
+            parent_id, ordered_block.block_meta.block_number, ordered_block.txns.len()
         );
-        println!("parent id is {:?}", parent_id.bytes());
         let mut state = self.state.lock().await;
         ordered_block.txns = ordered_block
             .txns
