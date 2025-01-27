@@ -1,7 +1,7 @@
 #!/bin/bash
 
 if [ "$#" -lt 2 ]; then
-    echo "Usage: $0 action=<deploy|stop> node=<server1,server2,...>"
+    echo "Usage: $0 action=<deploy|stop> node=<node1,node2,...>"
     exit 1
 fi
 
@@ -15,7 +15,7 @@ for arg in "$@"; do
         ;;
     *)
         echo "Unknown parameter: $arg"
-        echo "Usage: $0 action=<deploy|stop> node=<server1,server2,...>"
+        echo "Usage: $0 action=<deploy|stop> node=<node1,node2,...>"
         exit 1
         ;;
     esac
@@ -57,7 +57,19 @@ else
     exit 1
 fi
 
-validator_file="./server_confs/${node}/genesis/validator.yml"
+if [ "$action" == "deploy" ]; then
+    echo "Starting peth on nodes=$node..."
+    ansible-playbook -i inventory.ini reth_start.yml --limit "$node"
+
+    if [ $? -eq 0 ]; then
+        echo "Ansible playbook executed successfully."
+    else
+        echo "Ansible playbook execution failed."
+        exit 1
+    fi
+fi
+
+validator_file="./server_confs/${node}/genesis/validator.yaml"
 inventory_file="./inventory.ini"
 
 if [ ! -f "$validator_file" ]; then
