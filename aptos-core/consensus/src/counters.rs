@@ -8,6 +8,7 @@ use crate::{
     block_storage::tracing::{observe_block, BlockStage},
     quorum_store,
 };
+use api_types::compute_res::ComputeRes;
 use aptos_consensus_types::{block::Block, pipelined_block::PipelinedBlock};
 use aptos_crypto::HashValue;
 use aptos_executor_types::{StateComputeResult, ExecutorError};
@@ -1221,6 +1222,16 @@ pub fn update_counters_for_block(block: &Block) {
         COMMITTED_FAILED_ROUNDS_COUNT.inc_by(failed_rounds as u64);
     }
     quorum_store::counters::NUM_BATCH_PER_BLOCK.observe(block.payload_size() as f64);
+}
+
+// TODO(gravity_byteyue): Refactor this when compute res can carry txn status
+pub fn update_counters_for_compute_res(compute_res: &ComputeRes) {
+    let num = compute_res.txn_num(); 
+    LAST_COMMITTED_VERSION.add(num as i64);
+    NUM_TXNS_PER_BLOCK.observe(num as f64);
+    COMMITTED_TXNS_COUNT
+        .with_label_values(&[TXN_COMMIT_SUCCESS_LABEL])
+        .inc_by(num);
 }
 
 pub fn update_counters_for_compute_result(compute_result: &StateComputeResult) {
