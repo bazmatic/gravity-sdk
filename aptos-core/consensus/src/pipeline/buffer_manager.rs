@@ -159,7 +159,6 @@ pub struct BufferManager {
     consensus_observer_config: ConsensusObserverConfig,
     consensus_publisher: Option<Arc<ConsensusPublisher>>,
 
-    executed_block_counter: u64,
     commit_vote_cache: HashMap<HashValue, HashMap<HashValue, CommitVote>>,
 }
 
@@ -249,7 +248,6 @@ impl BufferManager {
 
             consensus_observer_config,
             consensus_publisher,
-            executed_block_counter: 0,
             commit_vote_cache: HashMap::new(),
         }
     }
@@ -402,6 +400,7 @@ impl BufferManager {
                         ConsensusObserverMessage::new_commit_decision_message(commit_proof.clone());
                     consensus_publisher.publish_message(message).await;
                 }
+                counters::SEND_TO_PERSISTING_BLOCK_COUNTER.inc_by(blocks_to_persist.len().try_into().unwrap());
                 self.persisting_phase_tx
                     .send(self.create_new_request(PersistingRequest {
                         blocks: blocks_to_persist,
@@ -659,9 +658,9 @@ impl BufferManager {
             }
             CommitMessage::Decision(commit_proof) => {
                 let target_block_id = commit_proof.ledger_info().commit_info().id();
-                info!("Receive commit decision {}", commit_proof.ledger_info().commit_info());
                 let cursor =
                     self.buffer.find_elem_by_key(*self.buffer.head_cursor(), target_block_id);
+                info!("Receive commit decision {}", commit_proof.ledger_info().commit_info());
                 if cursor.is_some() {
                     let item = self.buffer.take(&cursor);
                     let new_item = item.try_advance_to_aggregated_with_ledger_info(
@@ -773,8 +772,7 @@ impl BufferManager {
 
     fn need_backpressure(&self) -> bool {
         const MAX_BACKLOG: Round = 20;
-        // self.highest_committed_round + MAX_BACKLOG < self.latest_round
-        self.executed_block_counter > MAX_BACKLOG
+        self.highest_committed_round + MAX_BACKLOG < self.latest_round
     }
 
     pub async fn start(mut self) {
@@ -803,12 +801,11 @@ impl BufferManager {
         while !self.stop {
             // advancing the root will trigger sending requests to the pipeline
             counters::EXECUTED_BLOCK_COUNTER
-                .set(self.executed_block_counter as f64);
+                .set((self.latest_round as f64 - self.highest_committed_round as f64));
             ::tokio::select! {
                 Some(blocks) = self.block_rx.next(), if !self.need_backpressure() => {
                     self.latest_round = blocks.latest_round();
-                    counters::CREATED_EXECUTED_BLOCK_COUNTER.inc();
-                    self.executed_block_counter += 1;
+                    counters::CREATED_EXECUTED_BLOCK_COUNTER.set(self.latest_round as f64);
                     monitor!("buffer_manager_process_ordered", {
                     self.process_ordered_blocks(blocks).await;
                     if self.execution_root.is_none() {
@@ -854,9 +851,8 @@ impl BufferManager {
                 },
                 Some(Ok(round)) = self.persisting_phase_rx.next() => {
                     // see where `need_backpressure()` is called.
-                    self.executed_block_counter -= 1;
-                    counters::FINALIZED_EXECUTED_BLOCK_COUNTER.inc();
-                    self.highest_committed_round = round
+                    self.highest_committed_round = round;
+                    counters::FINALIZED_EXECUTED_BLOCK_COUNTER.set(self.highest_committed_round as f64);
                 },
                 Some(rpc_request) = verified_commit_msg_rx.next() => {
                     monitor!("buffer_manager_process_commit_message",

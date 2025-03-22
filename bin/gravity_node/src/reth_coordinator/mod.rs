@@ -161,12 +161,13 @@ impl ExecutionChannel for RethCoordinator {
                 self.state.lock().await.insert_new_block(head.block_id, block_hash.unwrap().into());
             }
         }
-        info!("recv_executed_block_hash done {:?}", head);
+        
         let mut txn_number = None;
         {
             let mut map = self.block_number_to_txn_in_block.lock().await;
             txn_number = map.remove(&head.block_number);
         }
+        info!("recv_executed_block_hash done {:?}", head);
         Ok(ComputeRes::new(block_hash.unwrap().into(), txn_number.unwrap()))
     }
 

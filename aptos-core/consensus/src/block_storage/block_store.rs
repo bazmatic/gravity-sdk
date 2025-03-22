@@ -367,7 +367,9 @@ impl BlockStore {
                     .recv_committed_block_info(BlockId(*p_block.block().id()))
                     .await
                 {
-                    Ok(_) => {}
+                    Ok(_) => {
+                        counters::SEND_TO_RECOVER_BLOCK_COUNTER.inc();
+                    }
                     Err(e) => {
                         todo!();
                     }
