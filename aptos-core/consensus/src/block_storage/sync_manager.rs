@@ -433,8 +433,12 @@ impl BlockStore {
         //                 .concat(),
         //         )
         //     })?;
-
-        storage.save_tree(blocks.clone(), quorum_certs.clone())?;
+        let block_numbers = blocks
+            .iter()
+            .filter(|block| block.block_number().is_some())
+            .map(|block| (block.block_number().unwrap(), block.id()))
+            .collect::<Vec<(u64, HashValue)>>();
+        storage.save_tree(blocks.clone(), quorum_certs.clone(), block_numbers)?;
         if !ledger_infos.is_empty() {
             let ledger_info_batch = SchemaBatch::new();
             for ledger_info in ledger_infos {
