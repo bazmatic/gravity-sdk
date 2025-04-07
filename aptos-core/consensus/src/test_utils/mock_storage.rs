@@ -152,7 +152,7 @@ impl MockStorage {
 // A impl that always start from genesis.
 #[async_trait]
 impl PersistentLivenessStorage for MockStorage {
-    async fn latest_block_number(&self) -> u64 {
+    async fn latest_commit_block_number(&self) -> u64 {
         unimplemented!("")
     }
 
@@ -241,10 +241,6 @@ impl PersistentLivenessStorage for MockStorage {
     fn consensus_db(&self) -> Arc<crate::consensusdb::ConsensusDB> {
         unimplemented!()
     }
-    
-    fn fetch_next_block_number(&self) -> u64 {
-        todo!()
-    }
 }
 
 /// A storage that ignores any requests, used in the tests that don't care about the storage.
@@ -326,11 +322,5 @@ impl PersistentLivenessStorage for EmptyStorage {
 
     fn consensus_db(&self) -> Arc<crate::consensusdb::ConsensusDB> {
         unimplemented!()
-    }
-    
-    fn fetch_next_block_number(&self) -> u64 {
-        let res = self.next_block_number.load(Ordering::SeqCst);
-        self.next_block_number.store(res + 1, Ordering::SeqCst);
-        res
     }
 }

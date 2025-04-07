@@ -42,18 +42,14 @@ use aptos_types::{
     contract_event::ContractEvent, epoch_state::EpochState, ledger_info::LedgerInfoWithSignatures,
     randomness::Randomness, transaction::Transaction,
 };
+use block_buffer_manager::get_block_buffer_manager;
 use coex_bridge::{get_coex_bridge, Func};
 use fail::fail_point;
 use futures::{future::BoxFuture, SinkExt, StreamExt};
-use std::{
-    boxed::Box,
-    sync::Arc,
-    time::Duration,
-};
+use std::{boxed::Box, sync::Arc, time::Duration};
 use tokio::sync::Mutex as AsyncMutex;
 
 pub type StateComputeResultFut = BoxFuture<'static, ExecutorResult<PipelineExecutionResult>>;
-
 
 type NotificationType = (
     Box<dyn FnOnce() + Send + Sync>,
@@ -140,7 +136,7 @@ impl ExecutionProxy {
                 callback();
             }
         });
-        let execution_pipeline = 
+        let execution_pipeline =
             ExecutionPipeline::spawn(executor.clone(), handle, enable_pre_commit);
         Self {
             executor,
@@ -194,12 +190,7 @@ impl ExecutionProxy {
             block_executor_onchain_config,
             transaction_deduper,
             is_randomness_enabled,
-        } = self
-            .state
-            .read()
-            .as_ref()
-            .cloned()
-            .expect("must be set within an epoch");
+        } = self.state.read().as_ref().cloned().expect("must be set within an epoch");
 
         let block_preparer = Arc::new(BlockPreparer::new(
             payload_manager.clone(),
@@ -257,39 +248,26 @@ impl StateComputer for ExecutionProxy {
                 )
             })
             .collect();
-        let call = get_coex_bridge().borrow_func("send_ordered_block");
         APTOS_EXECUTION_TXNS.observe(real_txns.len() as f64);
-        match call {
-            Some(Func::SendOrderedBlocks(call)) => {
-                info!("call send_ordered_block function");
-                call.call((
-                    *parent_block_id,
-                    ExternalBlock { block_meta: meta_data.clone(), txns: real_txns },
-                ))
-                .await
-                .unwrap();
-            }
-            _ => {
-                info!("no send_ordered_block function");
-            }
-        }
-
         let txn_notifier = self.txn_notifier.clone();
-
         Box::pin(async move {
-            let call = get_coex_bridge().borrow_func("recv_executed_block_hash");
+            let block_id = meta_data.block_id;
+            let block_timestamp = meta_data.usecs;
+            get_block_buffer_manager()
+                .set_ordered_blocks(BlockId::from_bytes(parent_block_id.as_slice()), ExternalBlock {
+                    block_meta: meta_data.clone(),
+                    txns: real_txns,
+                })
+                .await.unwrap_or_else(|e| panic!("Failed to push ordered blocks {}", e));
             let u_ts = meta_data.usecs;
-            let compute_result = match call {
-                Some(Func::RecvExecutedBlockHash(call)) => {
-                    info!("call recv_executed_block_hash function");
-                    call.call(meta_data).await.unwrap()
-                }
-                _ => {
-                    panic!("no recv_executed_block_hash function");
-                }
-            };
-            observe_block(u_ts, BlockStage::EXECUTED);
+            let compute_result = get_block_buffer_manager()
+                .get_executed_res(block_id, meta_data.block_number)
+                .await.unwrap_or_else(|e| panic!("Failed to get executed result {}", e));
+
+
             update_counters_for_compute_res(&compute_result);
+           
+            observe_block(u_ts, BlockStage::EXECUTED);
             let txn_status = compute_result.txn_status.clone();
             match (*txn_status).as_ref() {
                 Some(txn_status) => {
@@ -308,6 +286,7 @@ impl StateComputer for ExecutionProxy {
                 None => {}
             }
             let result = StateComputeResult::new(compute_result, None, None);
+
             let pre_commit_fut: BoxFuture<'static, ExecutorResult<()>> =
                     {
                         Box::pin(async move {
@@ -372,9 +351,7 @@ impl StateComputer for ExecutionProxy {
         monitor!(
             "commit_block",
             tokio::task::spawn_blocking(move || {
-                executor
-                    .commit_ledger(block_ids, proof)
-                    .expect("Failed to commit blocks");
+                executor.commit_ledger(block_ids, proof).expect("Failed to commit blocks");
             })
             .await
         )
@@ -482,7 +459,7 @@ async fn test_commit_sync_race() {
     };
     use aptos_config::config::transaction_filter_type::Filter;
     use aptos_consensus_notifications::Error;
-    
+
     use aptos_infallible::Mutex;
     use aptos_types::{
         aggregate_signature::AggregateSignature,
@@ -532,10 +509,7 @@ async fn test_commit_sync_race() {
             todo!()
         }
 
-        fn pre_commit_block(
-            &self,
-            _block_id: HashValue,
-        ) -> ExecutorResult<()> {
+        fn pre_commit_block(&self, _block_id: HashValue) -> ExecutorResult<()> {
             todo!()
         }
 

@@ -4,7 +4,7 @@
 
 use crate::{consensusdb::ConsensusDB, epoch_manager::LivenessStorageData, error::DbError};
 use anyhow::{format_err, Result};
-use api_types::{ExecutionArgs, RecoveryApi};
+use api_types::ExecutionArgs;
 use aptos_consensus_types::{
     block::Block, quorum_cert::QuorumCert, timeout_2chain::TwoChainTimeoutCertificate, vote::Vote,
     vote_data::VoteData, wrapped_ledger_info::WrappedLedgerInfo,
@@ -20,6 +20,7 @@ use aptos_types::{
     on_chain_config::ValidatorSet, proof::TransactionAccumulatorSummary, transaction::Version,
 };
 use async_trait::async_trait;
+use block_buffer_manager::get_block_buffer_manager;
 use itertools::Itertools;
 use std::{
     cmp::max,
@@ -75,9 +76,7 @@ pub trait PersistentLivenessStorage: Send + Sync {
     // Returns a handle of the consensus db
     fn consensus_db(&self) -> Arc<ConsensusDB>;
 
-    fn fetch_next_block_number(&self) -> u64;
-
-    async fn latest_block_number(&self) -> u64;
+    async fn latest_commit_block_number(&self) -> u64;
 }
 
 #[derive(Clone)]
@@ -125,6 +124,7 @@ impl LedgerRecoveryData {
         let (root_id, latest_ledger_info_sig) = if self.storage_ledger.ledger_info().ends_epoch() {
             let genesis =
                 Block::make_genesis_block_from_ledger_info(self.storage_ledger.ledger_info());
+                genesis.set_block_number(0);
             let genesis_qc = QuorumCert::certificate_for_genesis_from_ledger_info(
                 self.storage_ledger.ledger_info(),
                 genesis.id(),
@@ -370,51 +370,15 @@ impl RecoveryData {
 pub struct StorageWriteProxy {
     db: Arc<ConsensusDB>,
     aptos_db: Arc<dyn DbReader>,
-    next_block_number: AtomicU64,
-    recovery_api: Option<Arc<dyn RecoveryApi>>,
 }
 
 impl StorageWriteProxy {
     pub fn new(
         db: Arc<ConsensusDB>,
         aptos_db: Arc<dyn DbReader>,
-        recovery_api: Option<Arc<dyn RecoveryApi>>,
     ) -> Self {
         // let db = Arc::new(ConsensusDB::new(config.storage.dir()));
-        StorageWriteProxy { db, aptos_db, next_block_number: AtomicU64::new(0), recovery_api }
-    }
-
-    pub fn init_next_block_number(&self, blocks: &Vec<Block>) {
-        if blocks.len() == 0 {
-            self.next_block_number.store(1, Ordering::SeqCst);
-            return;
-        };
-
-        let mut max_block_number = 0;
-        for block in blocks {
-            if let Some(bn) = block.block_number() {
-                max_block_number = max_block_number.max(bn);
-            }
-        }
-        self.next_block_number.store(max_block_number + 1, Ordering::SeqCst);
-    }
-
-    async fn register_execution_args(&self, blocks: &Vec<Block>, latest_block_number: u64) {
-        let mut block_number_to_block_id: BTreeMap<u64, HashValue> = blocks
-            .iter()
-            .filter(|block| {
-                block.block_number().is_some()
-                    && block.block_number().unwrap() <= latest_block_number
-            })
-            .map(|block| (block.block_number().unwrap(), block.id()))
-            .sorted_by(|a, b| Ord::cmp(&b.0, &a.0))
-            .take(256)
-            .collect();
-        if latest_block_number == 0 {
-            block_number_to_block_id.insert(0u64, *GENESIS_BLOCK_ID);
-        }
-        let args = ExecutionArgs { block_number_to_block_id };
-        self.recovery_api.as_ref().unwrap().register_execution_args(args).await;
+        StorageWriteProxy { db, aptos_db }
     }
 }
 
@@ -447,7 +411,7 @@ impl PersistentLivenessStorage for StorageWriteProxy {
 
     async fn start(&self, order_vote_enabled: bool) -> LivenessStorageData {
         info!("Start consensus recovery.");
-        let latest_block_number = self.latest_block_number().await;
+        let latest_block_number = self.latest_commit_block_number().await;
         info!("The execution_latest_block_number is {}", latest_block_number);
         let raw_data =
             self.db.get_data(latest_block_number).expect("unable to recover consensus data");
@@ -460,7 +424,6 @@ impl PersistentLivenessStorage for StorageWriteProxy {
             bcs::from_bytes(&b).expect("unable to deserialize highest 2-chain timeout cert")
         });
         let blocks = raw_data.2;
-        self.init_next_block_number(&blocks);
         let quorum_certs: Vec<_> = raw_data.3;
         let blocks_repr: Vec<String> = blocks.iter().map(|b| format!("\n\t{}", b)).collect();
         info!("The following blocks were restored from ConsensusDB : {}", blocks_repr.concat());
@@ -471,7 +434,6 @@ impl PersistentLivenessStorage for StorageWriteProxy {
             *ACCUMULATOR_PLACEHOLDER_HASH,
             ValidatorSet::new(self.consensus_db().mock_validators()),
         );
-        self.register_execution_args(&blocks, latest_block_number).await;
         let ledger_recovery_data = LedgerRecoveryData::new(latest_ledger_info);
         match RecoveryData::new(
             last_vote,
@@ -532,13 +494,7 @@ impl PersistentLivenessStorage for StorageWriteProxy {
         self.db.clone()
     }
 
-    fn fetch_next_block_number(&self) -> u64 {
-        let next_block_number = self.next_block_number.load(Ordering::SeqCst);
-        self.next_block_number.fetch_add(1, Ordering::SeqCst);
-        next_block_number
-    }
-
-    async fn latest_block_number(&self) -> u64 {
-        self.recovery_api.as_ref().unwrap().latest_block_number().await
+    async fn latest_commit_block_number(&self) -> u64 {
+        get_block_buffer_manager().latest_commit_block_number().await
     }
 }
