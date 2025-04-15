@@ -4,7 +4,6 @@
 
 use crate::{
     block_storage::tracing::{observe_block, BlockStage},
-    counters,
     dag::{
         DAGMessage, DAGNetworkMessage, DAGRpcResult, ProofNotifier, RpcWithFallback,
         TDAGNetworkSender,
@@ -33,7 +32,7 @@ use aptos_consensus_types::{
     vote_msg::VoteMsg,
 };
 use gaptos::aptos_logger::prelude::*;
-use aptos_network::{
+use gaptos::aptos_network::{
     application::interface::{NetworkClient, NetworkServiceEvents},
     protocols::{network::Event, rpc::error::RpcError},
     ProtocolId,
@@ -59,6 +58,7 @@ use std::{
     time::Duration,
 };
 use tokio::time::timeout;
+use gaptos::aptos_consensus::counters as counters;
 
 pub trait TConsensusMsg: Sized + Serialize + DeserializeOwned {
     fn epoch(&self) -> u64;

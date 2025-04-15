@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    counters::RAND_QUEUE_SIZE,
     logging::{LogEvent, LogSchema},
     network::{IncomingRandGenRequest, NetworkSender, TConsensusMsg},
     pipeline::buffer_manager::{OrderedBlocks, ResetAck, ResetRequest, ResetSignal},
@@ -24,7 +23,7 @@ use gaptos::aptos_config::config::ReliableBroadcastConfig;
 use aptos_consensus_types::common::{Author, Round};
 use gaptos::aptos_infallible::Mutex;
 use gaptos::aptos_logger::{error, info, spawn_named, trace, warn};
-use aptos_network::{protocols::network::RpcError, ProtocolId};
+use gaptos::aptos_network::{protocols::network::RpcError, ProtocolId};
 use gaptos::aptos_reliable_broadcast::{DropGuard, ReliableBroadcast};
 use gaptos::aptos_time_service::TimeService;
 use gaptos::aptos_types::{
@@ -44,6 +43,7 @@ use futures_channel::{
 };
 use std::{sync::Arc, time::Duration};
 use tokio_retry::strategy::ExponentialBackoff;
+use gaptos::aptos_consensus::counters::RAND_QUEUE_SIZE;
 
 pub type Sender<T> = UnboundedSender<T>;
 pub type Receiver<T> = UnboundedReceiver<T>;
