@@ -14,11 +14,13 @@ use greth::reth_node_ethereum;
 use greth::reth_pipe_exec_layer_ext_v2;
 use greth::reth_pipe_exec_layer_ext_v2::ExecutionArgs;
 use greth::reth_provider;
+use greth::reth_tracing::tracing_subscriber::Registry;
 use greth::reth_transaction_pool;
-
+use pprof::protos::Message;
 use api::check_bootstrap_config;
 use consensus::aptos::AptosConsensus;
 use gravity_storage::block_view_storage::BlockViewStorage;
+use pprof::ProfilerGuard;
 use reth::rpc::builder::auth::AuthServerHandle;
 use reth_coordinator::RethCoordinator;
 use reth_db::DatabaseEnv;
@@ -32,6 +34,8 @@ use tikv_jemalloc_ctl::raw;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tracing::info;
+use tracing_flame::FlameLayer;
+use tracing_subscriber::layer::SubscriberExt;
 mod cli;
 mod consensus;
 mod reth_cli;
@@ -40,9 +44,14 @@ mod reth_coordinator;
 use crate::cli::Cli;
 use std::cell::OnceCell;
 use std::collections::BTreeMap;
+use std::fmt::Debug;
+use std::fs::File;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::thread;
+use std::time::Duration;
+use std::time::Instant;
 
 use crate::reth_cli::RethCli;
 use clap::Parser;
@@ -156,7 +165,91 @@ fn run_reth(
 }
 
 
+struct ProfilingState {
+    guard: Option<ProfilerGuard<'static>>,
+    profile_count: usize,
+}
+
+fn setup_pprof_profiler() -> Arc<Mutex<ProfilingState>> {
+    let profiling_state = Arc::new(Mutex::new(ProfilingState {
+        guard: None,
+        profile_count: 0,
+    }));
+    
+    let profiling_state_clone = profiling_state.clone();
+    
+    thread::spawn(move || {
+        let config = 99;
+        
+        let start = Instant::now();
+        let max_duration = Duration::from_secs(60 * 30); // 最多运行30min
+        
+        while start.elapsed() < max_duration {
+            let profile_duration = Duration::from_secs(3 * 60);
+            
+            {
+                let mut state = profiling_state_clone.lock().unwrap();
+                state.guard = Some(ProfilerGuard::new(config).unwrap());
+                println!("Started profiling session #{}", state.profile_count + 1);
+            }
+            
+            thread::sleep(profile_duration);
+            // 
+            {
+                let mut state = profiling_state_clone.lock().unwrap();
+                if let Some(guard) = state.guard.take() {
+                    if let Ok(report) = guard.report().build() {
+                        let timestamp = std::time::SystemTime::now();
+                        let count = state.profile_count;
+                        
+                        let now = std::time::SystemTime::now();
+                        let formatted_time = {
+                            let elapsed = now.duration_since(std::time::UNIX_EPOCH).unwrap();
+                            let secs = elapsed.as_secs();
+                            let time = time::OffsetDateTime::from_unix_timestamp(secs as i64).unwrap();
+                            format!("{:02}-{:02}-{:02}-{:02}", 
+                                time.day(), time.hour(), time.minute(), time.second())
+                        };
+                        let flamegraph_path = format!("profile_{}_flame_{}.svg", count, formatted_time);
+                        if let Ok(file) = File::create(&flamegraph_path) {
+                            if let Err(e) = report.flamegraph(file) {
+                                eprintln!("Failed to write flamegraph: {}", e);
+                            } else {
+                                println!("Wrote flamegraph to {}", flamegraph_path);
+                            }
+                        }
+                        
+
+                        let proto_path = format!("profile_{}_proto_{:?}.pb", count, timestamp);
+                        if let Ok(mut file) = File::create(&proto_path) {
+                            if let Ok(profile) = report.pprof() {
+                                let mut content = Vec::new();
+                                if profile.write_to_vec(&mut content).is_ok() {
+                                    if std::io::Write::write_all(&mut file, &content).is_ok() {
+                                        println!("Wrote protobuf to {}", proto_path);
+                                    }
+                                }
+                            }
+                        }
+                        state.profile_count += 1;
+                    }
+                }
+            }
+            
+            thread::sleep(Duration::from_secs(5));
+        }
+    });
+    
+    profiling_state
+}
+
+
 fn main() {
+    let _profiling_state = if std::env::var("ENABLE_PPROF").is_ok() {
+        Some(setup_pprof_profiler())
+    } else {
+        None
+    };
     let (tx, mut rx) = tokio::sync::mpsc::channel(1);
     let cli = Cli::parse();
     let gcei_config = check_bootstrap_config(cli.gravity_node_config.node_config_path.clone());
