@@ -6,7 +6,6 @@ mod network;
 mod https;
 mod utils;
 pub mod consensus_api;
-pub mod coex;
 
 pub use gaptos::aptos_config::config::NodeConfig;
 pub use bootstrap::check_bootstrap_config;

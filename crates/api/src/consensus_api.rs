@@ -9,10 +9,6 @@ use crate::{
     logger,
     network::{create_network_runtime, extract_network_configs},
 };
-use api_types::{
-    compute_res::ComputeRes, u256_define::BlockId, ConsensusApi, ExecError, ExecutionLayer,
-    ExternalBlock, ExternalBlockMeta,
-};
 use gaptos::aptos_build_info as aptos_build_info;
 use gaptos::aptos_build_info::build_information;
 use gaptos::aptos_config::{config::NodeConfig, network_id::NetworkId};
@@ -23,11 +19,9 @@ use gaptos::aptos_logger::{info, warn};
 use gaptos::aptos_network_builder::builder::NetworkBuilder;
 use gaptos::aptos_storage_interface::DbReaderWriter;
 use gaptos::aptos_telemetry::service::start_telemetry_service;
-use async_trait::async_trait;
-
 use gaptos::aptos_types::chain_id::ChainId;
 use futures::channel::mpsc;
-use tokio::runtime::Runtime;
+use tokio::{runtime::Runtime, sync::Mutex};
 
 #[cfg(unix)]
 #[global_allocator]
@@ -35,7 +29,6 @@ static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 pub struct ConsensusEngine {
     address: String,
-    execution_layer: ExecutionLayer,
     runtimes: Vec<Runtime>,
 }
 
@@ -63,7 +56,6 @@ fn fail_point_check(node_config: &NodeConfig) {
 impl ConsensusEngine {
     pub async fn init(
         node_config: NodeConfig,
-        execution_layer: ExecutionLayer,
         chain_id: u64,
         latest_block_number: u64,
     ) -> Arc<Self> {
@@ -91,6 +83,8 @@ impl ConsensusEngine {
             gaptos::aptos_event_notifications::EventSubscriptionService::new(Arc::new(
                 gaptos::aptos_infallible::RwLock::new(db.clone()),
             ));
+        // 将config_storage给塞到event_subscription_service里面
+        // event_subscription_service.set_config_storage(gravity_storage);
         let network_configs = extract_network_configs(&node_config);
 
         let network_config = network_configs.get(0).unwrap();
@@ -133,18 +127,6 @@ impl ConsensusEngine {
         let (consensus_to_mempool_sender, consensus_to_mempool_receiver) = mpsc::channel(1);
         let (notification_sender, notification_receiver) = mpsc::channel(1);
 
-        // Create notification senders and listeners for mempool, consensus and the storage service
-        // For Gravity we only use it to notify the mempool for the committed txn gc logic
-        let mempool_notifier =
-            gaptos::aptos_mempool_notifications::MempoolNotifier::new(notification_sender);
-        let mempool_notification_handler = MempoolNotificationHandler::new(mempool_notifier);
-        let mut consensus_mempool_handler =
-            ConsensusToMempoolHandler::new(mempool_notification_handler, consensus_listener);
-        let runtime = gaptos::aptos_runtimes::spawn_named_runtime("Con2Mempool".into(), None);
-        runtime.spawn(async move {
-            consensus_mempool_handler.start().await;
-        });
-        runtimes.push(runtime);
         let mempool_listener =
             gaptos::aptos_mempool_notifications::MempoolNotificationListener::new(notification_receiver);
         let (_mempool_client_sender, _mempool_client_receiver) = mpsc::channel(1);
@@ -157,7 +139,6 @@ impl ConsensusEngine {
             consensus_to_mempool_receiver,
             mempool_listener,
             peers_and_metadata,
-            execution_layer.execution_api.clone(),
         );
         runtimes.extend(mempool_runtime);
         init_block_buffer_manager(&consensus_db, latest_block_number).await;
@@ -172,10 +153,22 @@ impl ConsensusEngine {
             &mut args,
         );
         runtimes.push(consensus_runtime);
+        // Create notification senders and listeners for mempool, consensus and the storage service
+        // For Gravity we only use it to notify the mempool for the committed txn gc logic
+        let mempool_notifier =
+            gaptos::aptos_mempool_notifications::MempoolNotifier::new(notification_sender);
+        let mempool_notification_handler = MempoolNotificationHandler::new(mempool_notifier);
+        let event_subscription_service = Arc::new(Mutex::new(event_subscription_service));
+        let mut consensus_mempool_handler =
+            ConsensusToMempoolHandler::new(mempool_notification_handler, consensus_listener, event_subscription_service.clone());
+        let runtime = gaptos::aptos_runtimes::spawn_named_runtime("Con2Mempool".into(), None);
+        runtime.spawn(async move {
+            consensus_mempool_handler.start().await;
+        });
+        runtimes.push(runtime);
         // trigger this to make epoch manager invoke new epoch
         let args = HttpsServerArgs {
             address: node_config.https_server_address,
-            execution_api: execution_layer.execution_api.clone(),
             cert_pem: node_config
                 .https_cert_pem_path
                 .clone()
@@ -194,45 +187,10 @@ impl ConsensusEngine {
         runtimes.push(runtime);
         let arc_consensus_engine = Arc::new(Self {
             address: node_config.validator_network.as_ref().unwrap().listen_address.to_string(),
-            execution_layer: execution_layer.clone(),
             runtimes,
         });
-        crate::coex::register_hook_func(arc_consensus_engine.clone());
         // process new round should be after init retƒh hash
-        let _ = event_subscription_service.notify_initial_configs(1_u64);
+        let _ = event_subscription_service.lock().await.notify_initial_configs(1_u64);
         arc_consensus_engine
-    }
-}
-
-#[async_trait]
-impl ConsensusApi for ConsensusEngine {
-    async fn send_ordered_block(&self, parent_id: [u8; 32], ordered_block: ExternalBlock) {
-        info!("send_order_block {:?}", ordered_block);
-        match self
-            .execution_layer
-            .execution_api
-            .recv_ordered_block(BlockId(parent_id), ordered_block)
-            .await
-        {
-            Ok(_) => {}
-            Err(ExecError::DuplicateExecError) => {}
-            Err(_) => panic!("send_ordered_block should not fail"),
-        }
-    }
-
-    async fn recv_executed_block_hash(&self, head: ExternalBlockMeta) -> ComputeRes {
-        info!("recv_executed_block_hash");
-        let res = match self.execution_layer.execution_api.send_executed_block_hash(head).await {
-            Ok(r) => r,
-            Err(_) => panic!("send_ordered_block should not fail"),
-        };
-        res
-    }
-
-    async fn commit_block_hash(&self, head: [u8; 32]) {
-        match self.execution_layer.execution_api.recv_committed_block_info(BlockId(head)).await {
-            Ok(_) => {}
-            Err(_) => panic!("commit_block_hash should not fail"),
-        }
     }
 }

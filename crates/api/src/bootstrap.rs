@@ -5,7 +5,7 @@ use std::{
 };
 
 use crate::network::{build_network_interfaces, consensus_network_configuration, extract_network_ids, mempool_network_configuration};
-use api_types::{u256_define::BlockId, ExecutionChannel};
+use gaptos::api_types::u256_define::BlockId;
 use block_buffer_manager::get_block_buffer_manager;
 use gaptos::aptos_config::{
     config::{NetworkConfig, NodeConfig, Peer, PeerRole},
@@ -32,7 +32,7 @@ use gaptos::aptos_types::account_address::AccountAddress;
 use gaptos::aptos_validator_transaction_pool::VTxnPoolState;
 use futures::channel::mpsc::{Receiver, Sender};
 use serde::{Deserialize, Serialize};
-use tokio::runtime::Runtime;
+use tokio::{runtime::Runtime, sync::Mutex};
 
 const RECENT_BLOCKS_RANGE: u64 = 256;
 
@@ -134,7 +134,6 @@ pub fn init_mempool(
     consensus_to_mempool_receiver: Receiver<QuorumStoreRequest>,
     mempool_listener: MempoolNotificationListener,
     peers_and_metadata: Arc<PeersAndMetadata>,
-    execution_api: Arc<dyn ExecutionChannel>,
 ) -> Vec<Runtime> {
     let mempool_reconfig_subscription = event_subscription_service
         .subscribe_to_reconfigurations()
@@ -149,7 +148,6 @@ pub fn init_mempool(
         mempool_listener,
         mempool_reconfig_subscription,
         peers_and_metadata,
-        execution_api,
     )
 }
 

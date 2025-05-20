@@ -11,7 +11,7 @@ use std::{
 };
 use tokio::{sync::Mutex, time::Instant};
 
-use api_types::{
+use gaptos::api_types::{
     compute_res::{self, ComputeRes, TxnStatus}, u256_define::BlockId, ExternalBlock, VerifiedTxn,
     VerifiedTxnWithAccountSeqNum,
 };
@@ -380,7 +380,7 @@ impl BlockBufferManager {
                 block_num,
                 BlockState::Computed {
                     id: block_id,
-                    compute_res: ComputeRes { data: block_hash, txn_num: txn_len as u64, txn_status },
+                    compute_res: ComputeRes { data: block_hash, txn_num: txn_len as u64, txn_status, events: vec![] },
                 },
             );
             

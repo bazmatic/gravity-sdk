@@ -6,7 +6,7 @@ use std::{
 };
 
 use super::mempool::{Mempool, TxnId};
-use api_types::{
+use gaptos::api_types::{
     account::ExternalAccountAddress, u256_define::BlockId, ExternalBlock, ExternalBlockMeta,
     ExternalPayloadAttr, VerifiedTxn,
 };
@@ -57,6 +57,7 @@ impl MockConsensus {
                 block_id: BlockId(bytes),
                 block_number,
                 usecs: attr.ts,
+                epoch: 0,
                 randomness: None,
                 block_hash: None,
             },

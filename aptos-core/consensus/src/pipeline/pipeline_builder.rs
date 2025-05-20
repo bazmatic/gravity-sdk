@@ -12,7 +12,7 @@ use crate::{
 };
 use gaptos::aptos_consensus::counters as counters;
 use anyhow::anyhow;
-use api_types::{account::{ExternalAccountAddress, ExternalChainId}, u256_define::{BlockId, Random, TxnHash}, ExternalBlock, ExternalBlockMeta};
+use gaptos::api_types::{account::{ExternalAccountAddress, ExternalChainId}, u256_define::{BlockId, Random, TxnHash}, ExternalBlock, ExternalBlockMeta};
 use gaptos::aptos_consensus_notifications::ConsensusNotificationSender;
 use aptos_consensus_types::{
     block::Block,
@@ -40,7 +40,6 @@ use gaptos::aptos_types::{
     validator_signer::ValidatorSigner, vm_status::{DiscardedVMStatus, StatusCode},
 };
 use block_buffer_manager::get_block_buffer_manager;
-use coex_bridge::{get_coex_bridge, Func};
 use futures::FutureExt;
 use itertools::Itertools;
 use gaptos::move_core_types::account_address::AccountAddress;
@@ -443,7 +442,7 @@ impl PipelineBuilder {
         let real_txns = vtxns
             .into_iter()
             .map(|txn| {
-                api_types::VerifiedTxn::new(
+                gaptos::api_types::VerifiedTxn::new(
                     txn.bytes().to_vec(),
                     ExternalAccountAddress::new(txn.sender().into_bytes()),
                     txn.sequence_number(),
@@ -456,6 +455,7 @@ impl PipelineBuilder {
             block_id: BlockId(*block.id()),
             block_number: block.block_number().unwrap_or_else(|| panic!("No block number")),
             usecs: block.timestamp_usecs(),
+            epoch: block.epoch(),
             randomness: maybe_rand.map(|r| Random::from_bytes(r.randomness())),
             block_hash: None,
         };
@@ -678,7 +678,7 @@ impl PipelineBuilder {
         if let Err(e) = monitor!(
             "notify_state_sync",
             state_sync_notifier
-                .notify_new_commit(commit_txns, subscribable_events)
+                .notify_new_commit(commit_txns, subscribable_events, block.block_number().unwrap_or_else(|| panic!("No block number")))
                 .await
         ) {
             error!(error = ?e, "Failed to notify state synchronizer");
