@@ -1,6 +1,5 @@
 use alloy_eips::BlockHashOrNumber;
 use alloy_primitives::TxHash;
-
 use api::{
     check_bootstrap_config, config_storage::ConfigStorageWrapper,
     consensus_api::{ConsensusEngine, ConsensusEngineArgs},
@@ -9,7 +8,7 @@ use consensus::mock_consensus::mock::MockConsensus;
 use gravity_storage::block_view_storage::BlockViewStorage;
 use greth::{
     gravity_storage, reth, reth::chainspec::EthereumChainSpecParser, reth_cli_util,
-    reth_node_builder, reth_node_ethereum, reth_pipe_exec_layer_ext_v2,
+    reth_node_api, reth_node_builder, reth_node_ethereum, reth_pipe_exec_layer_ext_v2,
     reth_pipe_exec_layer_ext_v2::ExecutionArgs, reth_provider,
     reth_transaction_pool::TransactionPool,
 };
@@ -24,9 +23,9 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::info;
 mod cli;
 mod consensus;
+mod metrics;
 mod reth_cli;
 mod reth_coordinator;
-mod metrics;
 
 use crate::cli::Cli;
 use std::{
@@ -39,7 +38,7 @@ use std::{
 
 use crate::reth_cli::RethCli;
 use clap::Parser;
-use reth_node_builder::{engine_tree_config, EngineNodeLauncher};
+use reth_node_builder::EngineNodeLauncher;
 use reth_node_ethereum::{node::EthereumAddOns, EthereumNode};
 use reth_provider::providers::BlockchainProvider;
 
@@ -74,7 +73,7 @@ fn run_reth(
                         let launcher = EngineNodeLauncher::new(
                             builder.task_executor().clone(),
                             builder.config().datadir(),
-                            engine_tree_config::TreeConfig::default(),
+                            reth_node_api::TreeConfig::default(),
                         );
                         builder.launch_with(launcher)
                     })
@@ -94,12 +93,7 @@ fn run_reth(
                     .unwrap();
                 let pool: RethTransactionPool = handle.node.pool;
 
-                let storage = BlockViewStorage::new(
-                    provider.clone(),
-                    latest_block.number,
-                    latest_block_hash,
-                    BTreeMap::new(),
-                );
+                let storage = BlockViewStorage::new(provider.clone());
                 let pipeline_api_v2 = reth_pipe_exec_layer_ext_v2::new_pipe_exec_layer_api(
                     chain_spec,
                     storage,
@@ -155,22 +149,20 @@ fn setup_pprof_profiler() -> Arc<Mutex<ProfilingState>> {
             }
 
             thread::sleep(profile_duration);
-
             {
                 let mut state = profiling_state_clone.lock().unwrap();
                 if let Some(guard) = state.guard.take() {
                     if let Ok(report) = guard.report().build() {
-                        let timestamp = std::time::SystemTime::now();
                         let count = state.profile_count;
 
                         let now = std::time::SystemTime::now();
                         let formatted_time = {
                             let elapsed = now.duration_since(std::time::UNIX_EPOCH).unwrap();
                             let secs = elapsed.as_secs();
-                            let time = time::OffsetDateTime::from_unix_timestamp(secs as i64).unwrap();
-                            format!("{:02}", 
-                                time.millisecond())
-                        };                        
+                            let time =
+                                time::OffsetDateTime::from_unix_timestamp(secs as i64).unwrap();
+                            format!("{:02}", time.millisecond())
+                        };
 
                         let proto_path = format!("profile_{}_proto_{:?}.pb", count, formatted_time);
                         if let Ok(mut file) = File::create(&proto_path) {
@@ -195,11 +187,8 @@ fn setup_pprof_profiler() -> Arc<Mutex<ProfilingState>> {
 }
 
 fn main() {
-    let _profiling_state = if std::env::var("ENABLE_PPROF").is_ok() {
-        Some(setup_pprof_profiler())
-    } else {
-        None
-    };
+    let _profiling_state =
+        if std::env::var("ENABLE_PPROF").is_ok() { Some(setup_pprof_profiler()) } else { None };
     let (tx, mut rx) = tokio::sync::mpsc::channel(1);
     let cli = Cli::parse();
     let gcei_config = check_bootstrap_config(cli.gravity_node_config.node_config_path.clone());
@@ -219,7 +208,11 @@ fn main() {
                     execution_args_tx,
                 ));
                 let mut _engine = None;
-                if std::env::var("MOCK_CONSENSUS").unwrap_or("false".to_string()).parse::<bool>().unwrap() {
+                if std::env::var("MOCK_CONSENSUS")
+                    .unwrap_or("false".to_string())
+                    .parse::<bool>()
+                    .unwrap()
+                {
                     info!("start mock consensus");
                     let mock = MockConsensus::new().await;
                     tokio::spawn(async move {
