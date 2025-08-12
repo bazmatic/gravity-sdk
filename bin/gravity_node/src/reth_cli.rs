@@ -185,6 +185,10 @@ impl RethCli {
             transactions,
             senders,
             epoch: block.block_meta.epoch,
+            proposer: block
+                .block_meta
+                .proposer
+                .map(|x| Address::from_word(x.bytes().into())),
         });
         Ok(())
     }
