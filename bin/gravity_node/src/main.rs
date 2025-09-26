@@ -5,13 +5,20 @@ use api::{
     config_storage::ConfigStorageWrapper,
     consensus_api::{ConsensusEngine, ConsensusEngineArgs},
 };
+use async_trait::async_trait;
 use consensus::mock_consensus::mock::MockConsensus;
+use gaptos::api_types::{
+    on_chain_config::jwks::JWKStruct, relayer::{Relayer, GLOBAL_RELAYER}, ExecError
+};
 use gravity_storage::block_view_storage::BlockViewStorage;
 use greth::{
-    gravity_storage, reth, reth::chainspec::EthereumChainSpecParser,
-    reth_cli::chainspec::ChainSpecParser, reth_cli_util, reth_db, reth_node_api, reth_node_builder,
-    reth_node_ethereum, reth_pipe_exec_layer_ext_v2, reth_pipe_exec_layer_ext_v2::ExecutionArgs,
-    reth_provider, reth_transaction_pool::TransactionPool,
+    gravity_storage,
+    reth::{self, chainspec::EthereumChainSpecParser},
+    reth_cli::chainspec::ChainSpecParser,
+    reth_cli_util, reth_db, reth_node_api, reth_node_builder, reth_node_ethereum,
+    reth_pipe_exec_layer_ext_v2::{self, ExecutionArgs, ObserveState, ObservedValue, RelayerManager},
+    reth_provider,
+    reth_transaction_pool::TransactionPool,
 };
 use pprof::{protos::Message, ProfilerGuard};
 use reth::rpc::builder::auth::AuthServerHandle;
@@ -144,6 +151,45 @@ struct ProfilingState {
     profile_count: usize,
 }
 
+struct RelayerWrapper {
+    manager: RelayerManager,
+}
+
+impl RelayerWrapper {
+    pub fn new() -> Self {
+        let manager = RelayerManager::new();
+        Self { manager }
+    }
+}
+
+// TODO: Aptos must read the initial state of corresponding JWKs from the chain before startup
+// because the JWK observer defaults to directly getting the latest data via REST requests
+#[async_trait]
+impl Relayer for RelayerWrapper {
+    async fn add_uri(
+        &self,
+        uri: &str,
+        rpc_url: &str,
+    ) -> Result<(), ExecError> {
+        info!("add_uri: {:?}, {:?}", uri, rpc_url);
+        // TODO: Call GLOBAL EXECUTE here to get the last state of the corresponding URI to calculate which block number to start from
+        // TODO: Need to add a new interface in the contract to pass through
+        self.manager
+            .add_uri(uri, rpc_url)
+            .await
+            .map_err(|e| ExecError::Other(e.to_string()))
+    }
+
+    // TODO: All URIs starting with gravity:// are definitely UnsupportedJWK
+    async fn get_last_state(&self, uri: &str) -> Result<Vec<JWKStruct>, ExecError> {
+        info!("get_last_state: {:?}", uri);
+        self.manager
+            .poll_uri(uri)
+            .await
+            .map_err(|e| ExecError::Other(e.to_string()))
+    }
+}
+
 fn setup_pprof_profiler() -> Arc<Mutex<ProfilingState>> {
     let profiling_state = Arc::new(Mutex::new(ProfilingState { guard: None, profile_count: 0 }));
 
@@ -226,6 +272,12 @@ fn main() {
                 mock.run().await;
             });
         } else {
+            match GLOBAL_RELAYER.set(Arc::new(RelayerWrapper::new())) {
+                Ok(_) => {}
+                Err(_) => {
+                    panic!("failed to set global relayer");
+                }
+            }
             _engine = Some(
                 ConsensusEngine::init(ConsensusEngineArgs {
                     node_config: gcei_config,
