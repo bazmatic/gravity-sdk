@@ -34,7 +34,7 @@ use gaptos::{
 };
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
-    sync::atomic::Ordering,
+    sync::{atomic::Ordering, Arc, Mutex},
     time::{Duration, Instant, SystemTime},
 };
 
@@ -42,18 +42,63 @@ use super::transaction::VerifiedTxn;
 use block_buffer_manager::TxPool;
 use gaptos::aptos_mempool::counters;
 
+pub struct TxnCache {
+    old_cache: HashSet<TxnHash>,
+    cache: HashSet<TxnHash>,
+    size: usize
+}
+
+impl TxnCache {
+    fn new(size: usize) -> Self {
+        Self {
+            old_cache: HashSet::new(),
+            cache: HashSet::new(),
+            size,
+        }
+    }
+
+    fn insert(&mut self, txn_hash: TxnHash) {
+        self.cache.insert(txn_hash);
+        if self.cache.len() > self.size {
+            self.old_cache = self.cache.clone();
+            self.cache.clear();
+        }
+    }
+
+    fn is_contains(&self, txn_hash: &TxnHash) -> bool {
+        self.cache.contains(txn_hash)
+    }
+
+}
+
 pub struct Mempool {
     // Stores the metadata of all transactions in mempool (of all states).
     pool: Box<dyn TxPool>,
+    txn_cache: Arc<Mutex<TxnCache>>,
 }
 
+#[async_trait::async_trait]
 impl CoreMempoolTrait for Mempool {
     fn timeline_range(
         &self,
         sender_bucket: MempoolSenderBucket,
         start_end_pairs: HashMap<TimelineIndexIdentifier, (u64, u64)>,
     ) -> Vec<(SignedTransaction, u64)> {
-        todo!()
+        let visited = self.txn_cache.clone();
+        let filter = Box::new(move |txn: (ExternalAccountAddress, u64, TxnHash)| {
+            !visited.lock().unwrap().is_contains(&txn.2)
+        });
+        let iter = self.pool.get_broadcast_txns(Some(filter));
+        let mut broacasted_txns = vec![];
+        let mut visited_cache = self.txn_cache.lock().unwrap();
+        for txn in iter {   
+            visited_cache.insert(TxnHash::from_bytes(txn.committed_hash().as_slice()));
+            broacasted_txns.push((
+                VerifiedTxn::from(txn).into(),
+                0,
+            ));
+        }
+        broacasted_txns
     }
 
     fn timeline_range_of_message(
@@ -63,11 +108,26 @@ impl CoreMempoolTrait for Mempool {
             HashMap<TimelineIndexIdentifier, (u64, u64)>,
         >,
     ) -> Vec<(SignedTransaction, u64)> {
-        todo!()
+        let visited = self.txn_cache.clone();
+        let filter = Box::new(move |txn: (ExternalAccountAddress, u64, TxnHash)| {
+            !visited.lock().unwrap().is_contains(&txn.2)
+        });
+        let iter = self.pool.get_broadcast_txns(Some(filter));
+        let mut broacasted_txns = vec![];
+        let mut visited_cache = self.txn_cache.lock().unwrap();
+        for txn in iter {   
+            visited_cache.insert(TxnHash::from_bytes(txn.committed_hash().as_slice()));
+            broacasted_txns.push((
+                VerifiedTxn::from(txn).into(),
+                0,
+            ));
+        }
+        broacasted_txns
     }
 
     fn get_parking_lot_addresses(&self) -> Vec<(AccountAddress, u64)> {
-        todo!()
+        // don't need to implement
+        vec![]
     }
 
     fn read_timeline(
@@ -78,22 +138,22 @@ impl CoreMempoolTrait for Mempool {
         before: Option<Instant>,
         priority_of_receiver: BroadcastPeerPriority,
     ) -> (Vec<(SignedTransaction, u64)>, MultiBucketTimelineIndexIds) {
-        todo!()
+        panic!("don't need to implement")
     }
 
     fn gc(&mut self) {
-        todo!()
+        // don't need to implement
     }
 
     fn gen_snapshot(&self) -> gaptos::aptos_mempool::logging::TxnsLog {
-        todo!()
+        panic!("don't need to implement")
     }
 
     fn get_by_hash(&self, hash: HashValue) -> Option<SignedTransaction> {
-        todo!()
+        panic!("don't need to implement")
     }
 
-    fn add_txn(
+    async fn add_txn(
         &mut self,
         txn: SignedTransaction,
         ranking_score: u64,
@@ -103,11 +163,19 @@ impl CoreMempoolTrait for Mempool {
         ready_time_at_sender: Option<u64>,
         priority: Option<BroadcastPeerPriority>,
     ) -> MempoolStatus {
-        todo!()
+        let verfited_txn = crate::core_mempool::transaction::VerifiedTxn::from(txn);
+        let res = self.pool.add_external_txn(
+            verfited_txn.into(),
+        ).await;
+        if res {
+            MempoolStatus::new(MempoolStatusCode::Accepted)
+        } else {
+            MempoolStatus::new(MempoolStatusCode::UnknownStatus)
+        }
     }
 
     fn gc_by_expiration_time(&mut self, block_time: Duration) {
-        todo!()
+        // don't need to implement
     }
 
     fn get_batch(
@@ -120,21 +188,21 @@ impl CoreMempoolTrait for Mempool {
             gaptos::aptos_consensus_types::common::TransactionInProgress,
         >,
     ) -> Vec<SignedTransaction> {
-        todo!()
+        self.get_batch_inner(max_txns, max_bytes, return_non_full, exclude_transactions)
     }
 
-    fn reject_transaction(
+    async fn reject_transaction(
         &mut self,
         sender: &AccountAddress,
         sequence_number: u64,
         hash: &HashValue,
         reason: &DiscardedVMStatus,
     ) {
-        todo!()
+        // don't need to implement
     }
 
     fn commit_transaction(&mut self, sender: &AccountAddress, sequence_number: u64) {
-        todo!()
+        // don't need to implement
     }
 
     fn log_commit_transaction(
@@ -144,13 +212,16 @@ impl CoreMempoolTrait for Mempool {
         tracked_use_case: Option<(UseCaseKey, &String)>,
         block_timestamp: Duration,
     ) {
-        todo!()
+        // don't need to implement
     }
 }
 
 impl Mempool {
     pub fn new(_config: &NodeConfig, pool: Box<dyn TxPool>) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            txn_cache: Arc::new(Mutex::new(TxnCache::new(100000))),
+        }
     }
 
     /// This function will be called once the transaction has been stored.
@@ -230,15 +301,18 @@ impl Mempool {
     /// `exclude_transactions` - transactions that were sent to Consensus but were not committed yet
     ///  mempool should filter out such transactions.
     #[allow(clippy::explicit_counter_loop)]
-    pub(crate) fn get_batch(
+    pub(crate) fn get_batch_inner(
         &self,
         max_txns: u64,
         max_bytes: u64,
         return_non_full: bool,
-        exclude_transactions: BTreeMap<TransactionSummary, TransactionInProgress>,
+        exclude_transactions: BTreeMap<
+            gaptos::aptos_consensus_types::common::TransactionSummary,
+            gaptos::aptos_consensus_types::common::TransactionInProgress,
+        >,
     ) -> Vec<SignedTransaction> {
         let filter = Box::new(move |txn: (ExternalAccountAddress, u64, TxnHash)| {
-            let summary = TransactionSummary {
+            let summary = gaptos::aptos_consensus_types::common::TransactionSummary {
                 sender: AccountAddress::new(txn.0.bytes()),
                 sequence_number: txn.1,
                 hash: HashValue::new(txn.2 .0),
