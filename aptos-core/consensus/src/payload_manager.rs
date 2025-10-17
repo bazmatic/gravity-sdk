@@ -583,11 +583,13 @@ async fn process_payload(
             let mut vec_ret = Vec::new();
             if !receivers.is_empty() {
                 debug!(
-                    "QSE: waiting for data on {} receivers, block_round {}",
+                    "QSE: waiting for data on {} receivers, block_round {}, block_timestamp {}",
                     receivers.len(),
-                    block.round()
+                    block.round(),
+                    block.timestamp_usecs(),
                 );
             }
+            let start = std::time::Instant::now();
             for (digest, rx) in receivers {
                 match rx.await {
                     Err(e) => {

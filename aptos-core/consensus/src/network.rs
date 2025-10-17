@@ -20,7 +20,7 @@ use crate::{
 };
 use anyhow::{anyhow, bail, ensure};
 use gaptos::{aptos_channels::{self, aptos_channel, message_queues::QueueStyle}, aptos_crypto::HashValue};
-use gaptos::aptos_config::network_id::NetworkId;
+use gaptos::aptos_config::network_id::{NetworkId, PeerNetworkId};
 use aptos_consensus_types::{
     block_retrieval::{BlockRetrievalRequest, BlockRetrievalResponse},
     common::Author,
@@ -33,7 +33,7 @@ use aptos_consensus_types::{
 };
 use gaptos::aptos_logger::prelude::*;
 use gaptos::aptos_network::{
-    application::interface::{NetworkClient, NetworkServiceEvents},
+    application::interface::{NetworkClient, NetworkClientInterface, NetworkServiceEvents},
     protocols::{network::Event, rpc::error::RpcError},
     ProtocolId,
 };
@@ -130,12 +130,19 @@ pub struct IncomingRandGenRequest {
 }
 
 #[derive(Debug)]
+pub struct IncomingSyncInfoRequest {
+    pub protocol: ProtocolId,
+    pub response_sender: oneshot::Sender<Result<Bytes, RpcError>>,
+}
+
+#[derive(Debug)]
 pub enum IncomingRpcRequest {
     BlockRetrieval(IncomingBlockRetrievalRequest),
     BatchRetrieval(IncomingBatchRetrievalRequest),
     DAGRequest(IncomingDAGRequest),
     CommitRequest(IncomingCommitRequest),
     RandGenRequest(IncomingRandGenRequest),
+    SyncInfoRequest(IncomingSyncInfoRequest),
 }
 
 impl IncomingRpcRequest {
@@ -146,6 +153,7 @@ impl IncomingRpcRequest {
             IncomingRpcRequest::RandGenRequest(req) => Some(req.req.epoch()),
             IncomingRpcRequest::CommitRequest(req) => req.req.epoch(),
             IncomingRpcRequest::BlockRetrieval(_) => None,
+            IncomingRpcRequest::SyncInfoRequest(_) => None,
         }
     }
 }
@@ -173,7 +181,7 @@ pub trait QuorumStoreSender: Send + Clone {
     async fn request_batch(
         &self,
         request: BatchRequest,
-        recipient: Author,
+        recipient: PeerNetworkId,
         timeout: Duration,
     ) -> anyhow::Result<BatchResponse>;
 
@@ -188,6 +196,8 @@ pub trait QuorumStoreSender: Send + Clone {
     async fn broadcast_proof_of_store_msg(&mut self, proof_of_stores: Vec<ProofOfStore>);
 
     async fn send_proof_of_store_msg_to_self(&mut self, proof_of_stores: Vec<ProofOfStore>);
+
+    fn get_available_peers(&self) -> anyhow::Result<Vec<PeerNetworkId>>;
 }
 
 /// Implements the actual networking support for all consensus messaging.
@@ -223,7 +233,7 @@ impl NetworkSender {
     pub async fn request_block(
         &self,
         retrieval_request: BlockRetrievalRequest,
-        from: Author,
+        from: PeerNetworkId,
         timeout: Duration,
     ) -> anyhow::Result<BlockRetrievalResponse> {
         fail_point!("consensus::send::any", |_| {
@@ -233,28 +243,29 @@ impl NetworkSender {
             Err(anyhow::anyhow!("Injected error in request_block"))
         });
 
-        ensure!(from != self.author, "Retrieve block from self");
+        ensure!(from.peer_id() != self.author, "Retrieve block from self");
         let msg = ConsensusMsg::BlockRetrievalRequest(Box::new(retrieval_request.clone()));
         counters::CONSENSUS_SENT_MSGS
             .with_label_values(&[msg.name()])
             .inc();
-        let response_msg = monitor!("block_retrieval", self.send_rpc(from, msg, timeout).await)?;
+        let response_msg = monitor!(
+            "block_retrieval",
+            self.consensus_network_client.network_client.send_to_peer_rpc(msg, timeout, from).await
+        )?;
         let response = match response_msg {
             ConsensusMsg::BlockRetrievalResponse(resp) => *resp,
             _ => return Err(anyhow!("Invalid response to request")),
         };
         if retrieval_request.block_id() != HashValue::zero() {
-            response
-                .verify(retrieval_request, &self.validators)
-                .map_err(|e| {
-                    error!(
-                        SecurityEvent::InvalidRetrievedBlock,
-                        request_block_response = response,
-                        error = ?e,
-                    );
-                    e
-                })?;
-            }
+            response.verify(retrieval_request, &self.validators).map_err(|e| {
+                error!(
+                    SecurityEvent::InvalidRetrievedBlock,
+                    request_block_response = response,
+                    error = ?e,
+                );
+                e
+            })?;
+        }
 
         Ok(response)
     }
@@ -475,12 +486,17 @@ impl QuorumStoreSender for NetworkSender {
     async fn request_batch(
         &self,
         request: BatchRequest,
-        recipient: Author,
+        recipient: PeerNetworkId,
         timeout: Duration,
     ) -> anyhow::Result<BatchResponse> {
+        debug!("NetworkSender: request_batch, digest:{}", request.digest());
         let request_digest = request.digest();
         let msg = ConsensusMsg::BatchRequestMsg(Box::new(request));
-        let response = self.send_rpc(recipient, msg, timeout).await?;
+        let response = self
+            .consensus_network_client
+            .network_client
+            .send_to_peer_rpc(msg, timeout, recipient)
+            .await?;
         match response {
             // TODO: deprecated, remove after another release (likely v1.11)
             ConsensusMsg::BatchResponse(batch) => {
@@ -525,6 +541,13 @@ impl QuorumStoreSender for NetworkSender {
         fail_point!("consensus::send::proof_of_store", |_| ());
         let msg = ConsensusMsg::ProofOfStoreMsg(Box::new(ProofOfStoreMsg::new(proofs)));
         self.send(msg, vec![self.author]).await
+    }
+
+    fn get_available_peers(&self) -> anyhow::Result<Vec<PeerNetworkId>> {
+        self.consensus_network_client
+            .network_client
+            .get_available_peers()
+            .map_err(|e| anyhow!("failed to get available peers: {}", e))
     }
 }
 
@@ -659,11 +682,12 @@ impl NetworkTask {
 
         // Verify the network events have been constructed correctly
         let network_and_events = network_service_events.into_network_and_events();
-        if (network_and_events.values().len() != 1)
-            || !network_and_events.contains_key(&NetworkId::Validator)
-        {
-            panic!("The network has not been setup correctly for consensus!");
-        }
+        /// TODO(nekomoto): fullnode does not have validator network events, but it still needs to handle sync info requests.
+        //if (network_and_events.values().len() != 1)
+        //    || !network_and_events.contains_key(&NetworkId::Validator)
+        //{
+        //    panic!("The network has not been setup correctly for consensus!");
+        //}
 
         // Collect all the network events into a single stream
         let network_events: Vec<_> = network_and_events.into_values().collect();
@@ -845,6 +869,12 @@ impl NetworkTask {
                             IncomingRpcRequest::RandGenRequest(IncomingRandGenRequest {
                                 req,
                                 sender: peer_id,
+                                protocol,
+                                response_sender: callback,
+                            })
+                        },
+                        ConsensusMsg::SyncInfoRequest => {
+                            IncomingRpcRequest::SyncInfoRequest(IncomingSyncInfoRequest {
                                 protocol,
                                 response_sender: callback,
                             })

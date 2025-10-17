@@ -4,9 +4,7 @@
 
 use crate::{
     block_storage::{
-        pending_blocks::PendingBlocks,
-        tracing::{observe_block, BlockStage},
-        BlockStore,
+        pending_blocks::PendingBlocks, tracing::{observe_block, BlockStage}, BlockReader, BlockStore
     }, consensus_observer::publisher::ConsensusPublisher, dag::{DagBootstrapper, DagCommitSigner, StorageAdapter}, error::{error_kind, DbError}, liveness::{
         cached_proposer_election::CachedProposerElection,
         leader_reputation::{
@@ -19,11 +17,12 @@ use crate::{
         proposer_election::ProposerElection,
         rotating_proposer_election::{choose_leader, RotatingProposer},
         round_proposer_election::RoundProposer,
-        round_state::{ExponentialTimeInterval, RoundState},
-    }, logging::{LogEvent, LogSchema}, metrics_safety_rules::MetricsSafetyRules, monitor, network::{
-        IncomingBatchRetrievalRequest, IncomingBlockRetrievalRequest, IncomingDAGRequest,
-        IncomingRandGenRequest, IncomingRpcRequest, NetworkReceivers, NetworkSender,
-    }, network_interface::{ConsensusMsg, ConsensusNetworkClient}, payload_client::{
+        round_state::{ExponentialTimeInterval, RoundState}, unequivocal_proposer_election::UnequivocalProposerElection,
+    }, logging::{LogEvent, LogSchema}, metrics_safety_rules::MetricsSafetyRules, monitor,
+    network::{
+        self, IncomingBatchRetrievalRequest, IncomingBlockRetrievalRequest, IncomingDAGRequest, IncomingRandGenRequest, IncomingRpcRequest, IncomingSyncInfoRequest, NetworkReceivers, NetworkSender
+    },
+    network_interface::{ConsensusMsg, ConsensusNetworkClient}, payload_client::{
         mixed::MixedPayloadClient, user::quorum_store_client::QuorumStoreClient, PayloadClient,
     }, payload_manager::{DirectMempoolPayloadManager, TPayloadManager}, persistent_liveness_storage::{LedgerRecoveryData, PersistentLivenessStorage, RecoveryData}, pipeline::execution_client::TExecutionClient, quorum_store::{
         quorum_store_builder::{DirectMempoolInnerBuilder, InnerBuilder, QuorumStoreBuilder},
@@ -32,19 +31,23 @@ use crate::{
     }, rand::rand_gen::{
         storage::interface::RandStorage,
         types::{AugmentedData, RandConfig},
-    }, recovery_manager::RecoveryManager, round_manager::{RoundManager, UnverifiedEvent, VerifiedEvent}, util::time_service::TimeService
+    }, recovery_manager::RecoveryManager, round_manager::{self, RoundManager, UnverifiedEvent, VerifiedEvent}, util::time_service::TimeService,
 };
 use anyhow::{anyhow, bail, ensure, Context};
 use gaptos::aptos_bounded_executor::BoundedExecutor;
 use gaptos::aptos_channels::{aptos_channel, message_queues::QueueStyle};
-use gaptos::aptos_config::config::{
-    ConsensusConfig, DagConsensusConfig, ExecutionConfig, NodeConfig, QcAggregatorType,
+use gaptos::aptos_config::{
+    config::{
+        ConsensusConfig, DagConsensusConfig, ExecutionConfig, NodeConfig, QcAggregatorType,
+    },
+    network_id::{NetworkId, PeerNetworkId},
 };
 use aptos_consensus_types::{
     common::{Author, Round},
     delayed_qc_msg::DelayedQcMsg,
     epoch_retrieval::EpochRetrievalRequest,
     proof_of_store::ProofCache,
+    sync_info::SyncInfo,
 };
 use gaptos::aptos_crypto::bls12381::PrivateKey;
 use gaptos::aptos_dkg::{
@@ -55,7 +58,7 @@ use gaptos::aptos_event_notifications::ReconfigNotificationListener;
 use gaptos::aptos_infallible::{duration_since_epoch, Mutex};
 use gaptos::aptos_logger::prelude::*;
 use aptos_mempool::QuorumStoreRequest;
-use gaptos::aptos_network::{application::interface::NetworkClient, protocols::network::Event};
+use gaptos::aptos_network::{application::interface::{NetworkClient, NetworkClientInterface}, protocols::network::Event};
 use aptos_safety_rules::{safety_rules_manager, PersistentSafetyStorage, SafetyRulesManager};
 use gaptos::aptos_types::{
     account_address::AccountAddress,
@@ -85,7 +88,7 @@ use futures::{
 };
 use itertools::Itertools;
 use mini_moka::sync::Cache;
-use rand::{prelude::StdRng, thread_rng, SeedableRng};
+use rand::{prelude::StdRng, thread_rng, Rng, SeedableRng};
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, HashMap},
@@ -139,6 +142,8 @@ pub struct EpochManager<P: OnChainConfigProvider> {
     epoch_state: Option<Arc<EpochState>>,
     block_retrieval_tx:
         Option<aptos_channel::Sender<AccountAddress, IncomingBlockRetrievalRequest>>,
+    sync_info_request_tx:
+        Option<aptos_channel::Sender<AccountAddress, IncomingSyncInfoRequest>>,
     quorum_store_msg_tx: Option<aptos_channel::Sender<AccountAddress, VerifiedEvent>>,
     quorum_store_coordinator_tx: Option<Sender<CoordinatorCommand>>,
     quorum_store_storage: Arc<dyn QuorumStoreStorage>,
@@ -147,7 +152,7 @@ pub struct EpochManager<P: OnChainConfigProvider> {
     bounded_executor: BoundedExecutor,
     // recovery_mode is set to true when the recovery manager is spawned
     recovery_mode: bool,
-
+    is_validator: bool,
     aptos_time_service: gaptos::aptos_time_service::TimeService,
     dag_rpc_tx: Option<aptos_channel::Sender<AccountAddress, IncomingDAGRequest>>,
     dag_shutdown_tx: Option<oneshot::Sender<oneshot::Sender<()>>>,
@@ -179,7 +184,19 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
         rand_storage: Arc<dyn RandStorage<AugmentedData>>,
         consensus_publisher: Option<Arc<ConsensusPublisher>>,
     ) -> Self {
-        let author = node_config.validator_network.as_ref().unwrap().peer_id();
+        let is_validator = node_config.base.role.is_validator();
+        let author = if is_validator {
+            node_config.validator_network.as_ref().unwrap().peer_id()
+        } else {
+            let mut vfn_peer_id = None;
+            for network in node_config.full_node_networks.iter() {
+                if network.network_id == NetworkId::Vfn {
+                    vfn_peer_id = Some(network.peer_id());
+                    break;
+                }
+            }
+            vfn_peer_id.expect("VFN must have a VFN network")
+        };
         let config = node_config.consensus.clone();
         let execution_config = node_config.execution.clone();
         let dag_config = node_config.dag_consensus.clone();
@@ -209,12 +226,14 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
             buffered_proposal_tx: None,
             epoch_state: None,
             block_retrieval_tx: None,
+            sync_info_request_tx: None,
             quorum_store_msg_tx: None,
             quorum_store_coordinator_tx: None,
             quorum_store_storage,
             batch_retrieval_tx: None,
             bounded_executor,
             recovery_mode: false,
+            is_validator,
             dag_rpc_tx: None,
             dag_shutdown_tx: None,
             aptos_time_service,
@@ -260,6 +279,7 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
             timeout_sender,
             delayed_qc_tx,
             qc_aggregator_type,
+            self.is_validator,
         )
     }
 
@@ -503,7 +523,7 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
             // We request proof to join higher epoch
             Ordering::Greater => {
                 let epoch = self.epoch();
-                let sender = self.round_manager_tx.as_mut().unwrap();
+                let sender = self.round_manager_tx.as_ref().unwrap();
 
                 let event = VerifiedEvent::EpochChange(epoch);
                 if let Err(e) = sender.push((peer_id, discriminant(&event)), (peer_id, event)) {
@@ -575,6 +595,30 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
             info!(epoch = epoch, "Block retrieval task stops");
         };
         self.block_retrieval_tx = Some(request_tx);
+        tokio::spawn(task);
+    }
+
+    fn spawn_sync_info_retrieval_task(
+        &mut self,
+        epoch: u64,
+        block_store: Arc<BlockStore>,
+    ) {
+        let (request_tx, mut request_rx) =
+            aptos_channel::new::<_, IncomingSyncInfoRequest>(QueueStyle::KLAST, 10, None);
+        let task = async move {
+            info!(epoch = epoch, "Sync info retrieval task starts");
+            while let Some(request) = request_rx.next().await {
+                let response = Box::new(block_store.sync_info());
+                let response_bytes =
+                    request.protocol.to_bytes(&ConsensusMsg::SyncInfo(response)).unwrap();
+                request
+                    .response_sender
+                    .send(Ok(response_bytes.into()))
+                    .map_err(|_| anyhow::anyhow!("Failed to send sync info response"));
+            }
+            info!(epoch = epoch, "Sync info retrieval task stops");
+        };
+        self.sync_info_request_tx = Some(request_tx);
         tokio::spawn(task);
     }
 
@@ -678,7 +722,10 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
             info!("Building QuorumStore");
             QuorumStoreBuilder::QuorumStore(InnerBuilder::new(
                 self.epoch(),
-                self.author,
+                PeerNetworkId::new(
+                    if self.is_validator { NetworkId::Validator } else { NetworkId::Vfn },
+                    self.author,
+                ),
                 epoch_state.verifier.len() as u64,
                 quorum_store_config,
                 consensus_to_quorum_store_rx,
@@ -782,9 +829,6 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
             self.config.qc_aggregator_type.clone(),
         );
 
-        info!(epoch = epoch, "Create ProposerElection");
-        let proposer_election =
-            self.create_proposer_election(&epoch_state, &onchain_consensus_config);
         let chain_health_backoff_config =
             ChainHealthBackoffConfig::new(self.config.chain_health_backoff.clone());
         let pipeline_backpressure_config = PipelineBackpressureConfig::new(
@@ -831,58 +875,69 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
             self.config.vote_back_pressure_limit,
             payload_manager,
             onchain_consensus_config.order_vote_enabled(),
+            self.is_validator,
             self.pending_blocks.clone(),
         ).await);
 
-        info!(epoch = epoch, "Create ProposalGenerator");
-        // txn manager is required both by proposal generator (to pull the proposers)
-        // and by event processor (to update their status).
-        let proposal_generator = ProposalGenerator::new(
-            self.author,
-            block_store.clone(),
-            payload_client,
-            self.time_service.clone(),
-            Duration::from_millis(self.config.quorum_store_poll_time_ms),
-            self.config.max_sending_block_txns,
-            self.config.max_sending_block_txns_after_filtering,
-            self.config.max_sending_block_bytes,
-            self.config.max_sending_inline_txns,
-            self.config.max_sending_inline_bytes,
-            onchain_consensus_config.max_failed_authors_to_store(),
-            self.config
-                .min_max_txns_in_block_after_filtering_from_backpressure,
-            pipeline_backpressure_config,
-            chain_health_backoff_config,
-            self.quorum_store_enabled,
-            onchain_consensus_config.effective_validator_txn_config(),
-            self.config
-                .quorum_store
-                .allow_batches_without_pos_in_proposal,
-        );
         let (round_manager_tx, round_manager_rx) = aptos_channel::new(
             QueueStyle::KLAST,
             10,
             Some(&counters::ROUND_MANAGER_CHANNEL_MSGS),
         );
 
+        self.round_manager_tx = Some(round_manager_tx.clone());
+        let max_blocks_allowed = self
+            .config
+            .max_blocks_per_receiving_request(onchain_consensus_config.quorum_store_enabled());
+
+        let validator_components = if self.is_validator {
+            info!(epoch = epoch, "Create ProposerElection");
+            let proposer_election =
+                self.create_proposer_election(&epoch_state, &onchain_consensus_config);
+            info!(epoch = epoch, "Create ProposalGenerator");
+            // txn manager is required both by proposal generator (to pull the proposers)
+            // and by event processor (to update their status).
+            let proposal_generator = ProposalGenerator::new(
+                self.author,
+                block_store.clone(),
+                payload_client,
+                self.time_service.clone(),
+                Duration::from_millis(self.config.quorum_store_poll_time_ms),
+                self.config.max_sending_block_txns,
+                self.config.max_sending_block_txns_after_filtering,
+                self.config.max_sending_block_bytes,
+                self.config.max_sending_inline_txns,
+                self.config.max_sending_inline_bytes,
+                onchain_consensus_config.max_failed_authors_to_store(),
+                self.config
+                    .min_max_txns_in_block_after_filtering_from_backpressure,
+                pipeline_backpressure_config,
+                chain_health_backoff_config,
+                self.quorum_store_enabled,
+                onchain_consensus_config.effective_validator_txn_config(),
+                self.config
+                    .quorum_store
+                    .allow_batches_without_pos_in_proposal,
+            );
+            Some(round_manager::ValidatorComponents::new(
+                Arc::new(UnequivocalProposerElection::new(proposer_election)),
+                Arc::new(proposal_generator),
+                safety_rules_container,
+            ))
+        } else {
+            None
+        };
+
         let (buffered_proposal_tx, buffered_proposal_rx) = aptos_channel::new(
             QueueStyle::KLAST,
             10,
             Some(&counters::ROUND_MANAGER_CHANNEL_MSGS),
         );
-        self.round_manager_tx = Some(round_manager_tx.clone());
         self.buffered_proposal_tx = Some(buffered_proposal_tx.clone());
-        let max_blocks_allowed = self
-            .config
-            .max_blocks_per_receiving_request(onchain_consensus_config.quorum_store_enabled());
-
         let mut round_manager = RoundManager::new(
-            epoch_state,
+            epoch_state.clone(),
             block_store.clone(),
             round_state,
-            proposer_election,
-            proposal_generator,
-            safety_rules_container,
             network_sender,
             self.storage.clone(),
             onchain_consensus_config,
@@ -891,6 +946,7 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
             onchain_randomness_config,
             onchain_jwk_consensus_config,
             fast_rand_config,
+            validator_components,
         );
 
         round_manager.init(last_vote).await;
@@ -904,7 +960,8 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
             close_rx,
         ));
 
-        self.spawn_block_retrieval_task(epoch, block_store, max_blocks_allowed);
+        self.spawn_block_retrieval_task(epoch, block_store.clone(), max_blocks_allowed);
+        self.spawn_sync_info_retrieval_task(epoch, block_store);
     }
 
     fn start_quorum_store(&mut self, quorum_store_builder: QuorumStoreBuilder) {
@@ -1666,7 +1723,8 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
             },
             None => {
                 ensure!(matches!(request, IncomingRpcRequest::BlockRetrieval(_))
-                            || matches!(request, IncomingRpcRequest::BatchRetrieval(_)));
+                            || matches!(request, IncomingRpcRequest::BatchRetrieval(_))
+                            || matches!(request, IncomingRpcRequest::SyncInfoRequest(_)));
             },
             _ => {},
         }
@@ -1704,11 +1762,91 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
                     bail!("Rand manager not started");
                 }
             },
+            IncomingRpcRequest::SyncInfoRequest(request) => {
+                if let Some(tx) = &self.sync_info_request_tx {
+                    tx.push(peer_id, request)
+                } else {
+                    error!("Round manager not started");
+                    Ok(())
+                }
+            },
+        }
+    }
+
+    /// Request the sync info from from other peers.
+    async fn request_sync_info(&self) -> anyhow::Result<(Author, Box<SyncInfo>)> {
+        debug_assert!(!self.is_validator);
+        let peers = self.network_sender.network_client.get_available_peers()?;
+        let mut vfn_peers = peers
+            .iter()
+            .filter(|peer| peer.network_id() == NetworkId::Vfn)
+            .map(|peer| peer.peer_id())
+            .collect::<Vec<_>>();
+        if vfn_peers.is_empty() {
+            return Err(anyhow::anyhow!("No vfn peers available"));
+        }
+        self.network_sender.network_client.sort_peers_by_latency(NetworkId::Vfn, &mut vfn_peers);
+        let peer = vfn_peers[0];
+        let sync_info = self
+            .network_sender
+            .network_client
+            .send_to_peer_rpc(
+                ConsensusMsg::SyncInfoRequest,
+                Duration::from_secs(5),
+                PeerNetworkId::new(NetworkId::Vfn, peer),
+            )
+            .await?;
+        match sync_info {
+            ConsensusMsg::SyncInfo(sync_info) => Ok((peer, sync_info)),
+            _ => Err(anyhow::anyhow!("Invalid response to request")),
+        }
+    }
+
+    /// Advance the block sync progress for fullnode.
+    async fn advance_block_sync(&self) {
+        if self.is_validator {
+            return
+        }
+
+        let (peer_id, sync_info) = match self.request_sync_info().await {
+            Ok((peer_id, sync_info)) => {
+                debug!("Requested sync info from {peer_id}, response: {sync_info}");
+                (peer_id, sync_info)
+            }
+            Err(e) => {
+                error!("Failed to request sync info: {e}");
+                return;
+            }
+        };
+
+        let self_epoch = self.epoch();
+        match sync_info.epoch().cmp(&self_epoch) {
+            Ordering::Greater => {
+                let sender = self.round_manager_tx.as_ref().unwrap();
+                let event = VerifiedEvent::EpochChange(self_epoch);
+                if let Err(e) = sender.push((peer_id, discriminant(&event)), (peer_id, event)) {
+                    error!("Failed to send event to round manager {:?}", e);
+                }
+            }
+            Ordering::Equal => {
+                let sender = self.round_manager_tx.as_ref().unwrap();
+                let event = VerifiedEvent::UnverifiedSyncInfo(sync_info);
+                if let Err(e) = sender.push((peer_id, discriminant(&event)), (peer_id, event)) {
+                    error!("Failed to send event to round manager {:?}", e);
+                }
+            }
+            Ordering::Less => {
+                info!(
+                    "fullnode received sync info in a lower epoch ({}) than self epoch ({})",
+                    sync_info.epoch(),
+                    self_epoch
+                );
+            }
         }
     }
 
     fn process_local_timeout(&mut self, round: u64) {
-        let Some(sender) = self.round_manager_tx.as_mut() else {
+        let Some(sender) = self.round_manager_tx.as_ref() else {
             warn!(
                 "Received local timeout for round {} without Round Manager",
                 round
@@ -1740,6 +1878,15 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
     ) {
         // initial start of the processor
         self.await_reconfig_notification().await;
+        let mut block_sync_interval = if self.is_validator {
+            // never awake
+            tokio::time::interval(Duration::from_secs(u64::MAX))
+        } else {
+            tokio::time::interval(Duration::from_millis(
+                std::env::var("GRAVITY_ADVANCE_BLOCK_SYNC_INTERVAL_MS")
+                    .map_or(1000, |s| s.parse::<u64>().unwrap()),
+            ))
+        };
         loop {
             tokio::select! {
                 (peer, msg) = network_receivers.consensus_messages.select_next_some() => {
@@ -1765,6 +1912,9 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
                     monitor!("epoch_manager_process_round_timeout",
                     self.process_local_timeout(round));
                 },
+                _ = block_sync_interval.tick() => {
+                    self.advance_block_sync().await;
+                }
             }
             // Continually capture the time of consensus process to ensure that clock skew between
             // validators is reasonable and to find any unusual (possibly byzantine) clock behavior.
