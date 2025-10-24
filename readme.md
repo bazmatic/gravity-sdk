@@ -219,5 +219,5 @@ This guide provides a comprehensive walkthrough of setting up a four-node networ
 
 We encourage contributions to the Gravity-SDK project. Whether you want to report an issue, suggest a new feature, or
 submit a pull request, we welcome your input! Please see our [Contributing Guidelines](CONTRIBUTING.md) for more
-information on how to get involved.
+information on how to get involved...
 
